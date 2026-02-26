@@ -1,23 +1,37 @@
 import os
 
 from celery import Celery
+from dotenv import find_dotenv, load_dotenv
 
-# set the default Django settings module for the 'celery' program.
-os.environ.setdefault("DJANGO_SETTINGS_MODULE", "flight_blender.settings")
+ENV_FILE = find_dotenv()
+if ENV_FILE:
+    load_dotenv(ENV_FILE)
+
 app = Celery(
     "flight_blender",
     include=["conformance_monitoring_operations.tasks", "surveillance_monitoring_operations.tasks"],
     broker_connection_retry_on_startup=True,
 )
 
-# Using a string here means the worker doesn't have to serialize
-# the configuration object to child processes.
-# - namespace='CELERY' means all celery-related configuration keys
-#   should have a `CELERY_` prefix.
-app.config_from_object("django.conf:settings", namespace="")
+app.conf.update(
+    accept_content=["json"],
+    task_serializer="json",
+    result_serializer="json",
+    broker_url=os.getenv("REDIS_BROKER_URL", "redis://localhost:6379/"),
+    result_backend=os.getenv("REDIS_BROKER_URL", "redis://localhost:6379/"),
+    timezone="UTC",
+)
 
-# Load task modules from all registered Django app configs.
-app.autodiscover_tasks()
+app.autodiscover_tasks(
+    [
+        "conformance_monitoring_operations",
+        "surveillance_monitoring_operations",
+        "flight_declaration_operations",
+        "flight_feed_operations",
+        "geo_fence_operations",
+        "rid_operations",
+    ]
+)
 
 
 @app.task(bind=True)
