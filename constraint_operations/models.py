@@ -1,111 +1,62 @@
 import uuid
 from datetime import datetime
 
-from django.db import models
+from sqlalchemy import UUID, Boolean, Column, DateTime, Float, ForeignKey, String, Text
+from sqlalchemy.orm import relationship
 
-from flight_declaration_operations.models import FlightDeclaration
-from geo_fence_operations.models import GeoFence
-
-# Create your models here.
+from flight_blender.db import Base
 
 
-class ConstraintDetail(models.Model):
-    """
-    Represents a constraint model used to define operational constraints.
-    Attributes:
-        id (UUIDField): The unique identifier for the constraint, automatically generated.
-        volumes (TextField): A JSON-encoded string representing the volumes associated with the constraint.
-        off_nominal_volumes (TextField): A JSON-encoded string representing off-nominal volumes for the constraint.
-        priority (IntegerField): The priority level of the constraint, where lower numbers indicate higher priority.
-        subscribers (TextField): A JSON-encoded string representing the subscribers associated with the constraint.
-        created_at (DateTimeField): The timestamp when the constraint was created, automatically set on creation.
-        updated_at (DateTimeField): The timestamp when the constraint was last updated, automatically updated on save.
-    Meta:
-        ordering (list): Specifies the default ordering of constraints by creation date in descending order.
-    """
+class ConstraintDetail(Base):
+    __tablename__ = "constraint_detail"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    geofence = models.OneToOneField(
-        GeoFence,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        help_text="Reference to the geofence associated with the constraint.",
-    )
-    volumes = models.TextField(blank=True)
-    _type = models.CharField(max_length=256, blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    geofence_id = Column(UUID(as_uuid=True), ForeignKey("geo_fence.id"), unique=True, nullable=True)
+    volumes = Column(Text, default="")
+    _type = Column(String(256), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        ordering = ["-created_at"]
+    geofence = relationship("GeoFence")
 
 
-class ConstraintReference(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    flight_declaration = models.ForeignKey(
-        FlightDeclaration,
-        on_delete=models.CASCADE,
-        help_text="Reference to the flight declaration associated with the constraint.",
-        null=True,
-        blank=True,
-    )
-    geofence = models.OneToOneField(
-        GeoFence,
-        on_delete=models.CASCADE,
-        null=True,
-        blank=True,
-        help_text="Reference to the geofence associated with the constraint.",
-    )
-    uss_availability = models.CharField(max_length=40, blank=True)
+class ConstraintReference(Base):
+    __tablename__ = "constraint_reference"
 
-    ovn = models.CharField(
-        max_length=128,
-        blank=True,
-        null=True,
-        help_text="Once the operational intent is created, the OVN is stored here.",
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    flight_declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"), nullable=True)
+    geofence_id = Column(UUID(as_uuid=True), ForeignKey("geo_fence.id"), unique=True, nullable=True)
+    uss_availability = Column(String(40), default="")
 
-    manager = models.CharField(
-        max_length=256,
-        null=True,
-    )
-    uss_base_url = models.CharField(
-        max_length=256,
-        help_text="USS base URL",
-        blank=True,
-    )
-    version = models.CharField(max_length=256, help_text="Constraint version", blank=True)
-    time_start = models.DateTimeField(default=datetime.now)
-    time_end = models.DateTimeField(default=datetime.now)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    ovn = Column(String(128), nullable=True)
 
-    is_live = models.BooleanField(
-        default=False,
-        help_text="Set to true if the operational intent is live",
-    )
+    manager = Column(String(256), nullable=True)
+    uss_base_url = Column(String(256), default="")
+    version = Column(String(256), default="")
+    time_start = Column(DateTime, default=datetime.now)
+    time_end = Column(DateTime, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    class Meta:
-        ordering = ["-created_at"]
+    is_live = Column(Boolean, default=False)
+
+    flight_declaration = relationship("FlightDeclaration")
+    geofence = relationship("GeoFence")
 
 
-class CompositeConstraint(models.Model):
-    """
-    CompositeConstraint model links a constraint reference with constraint details.
-    It associates a specific FlightDeclaration with defined spatial and temporal bounds,
-    altitude limits, and references to both the constraint's metadata and its detailed description.
-    """
+class CompositeConstraint(Base):
+    __tablename__ = "composite_constraint"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    declaration = models.ForeignKey(FlightDeclaration, on_delete=models.CASCADE)
-    bounds = models.CharField(max_length=140)
-    start_datetime = models.DateTimeField(default=datetime.now)
-    end_datetime = models.DateTimeField(default=datetime.now)
-    alt_max = models.FloatField()
-    alt_min = models.FloatField()
-    constraint_reference = models.ForeignKey(ConstraintReference, on_delete=models.CASCADE, related_name="composite_constraint_reference")
-    constraint_detail = models.ForeignKey(ConstraintDetail, on_delete=models.CASCADE, related_name="composite_constraint_detail")
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"))
+    bounds = Column(String(140), nullable=False)
+    start_datetime = Column(DateTime, default=datetime.now)
+    end_datetime = Column(DateTime, default=datetime.now)
+    alt_max = Column(Float, nullable=False)
+    alt_min = Column(Float, nullable=False)
+    constraint_reference_id = Column(UUID(as_uuid=True), ForeignKey("constraint_reference.id"))
+    constraint_detail_id = Column(UUID(as_uuid=True), ForeignKey("constraint_detail.id"))
+
+    declaration = relationship("FlightDeclaration")
+    constraint_reference = relationship("ConstraintReference")
+    constraint_detail = relationship("ConstraintDetail")

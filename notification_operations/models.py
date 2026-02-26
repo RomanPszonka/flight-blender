@@ -1,24 +1,22 @@
-# Create your models here.
-# Create your models here.
-
 import uuid
+from datetime import datetime
 
-from django.db import models
+from sqlalchemy import UUID, Boolean, Column, DateTime, ForeignKey, Text
+from sqlalchemy.orm import relationship
 
-from flight_declaration_operations.models import FlightDeclaration
-
-# Create your models here.
+from flight_blender.db import Base
 
 
-class OperatorRIDNotification(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    session_id = models.UUIDField(default=uuid.uuid4, blank=True, null=True)
-    message = models.TextField(help_text="Specify the message to be sent to the operator")
-    is_active = models.BooleanField(
-        default=True,
-        help_text="Specify if the notification is active, only active notifications will be sent to the operator",
-    )
-    flight_declaration = models.ForeignKey(FlightDeclaration, blank=True, null=True, on_delete=models.CASCADE)
+class OperatorRIDNotification(Base):
+    __tablename__ = "operator_rid_notification"
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), default=uuid.uuid4, nullable=True)
+    message = Column(Text, nullable=False)
+    is_active = Column(Boolean, default=True)
+    flight_declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"), nullable=True)
+
+    flight_declaration = relationship("FlightDeclaration")
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

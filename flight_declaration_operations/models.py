@@ -2,118 +2,52 @@ import itertools
 import uuid
 from datetime import datetime
 
-from django.db import models
-from django.utils.translation import gettext_lazy as _
+from sqlalchemy import UUID, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.orm import relationship
 
-from common.data_definitions import OPERATION_STATES, OPERATION_TYPES
+from flight_blender.db import Base
 
 
-class FlightDeclaration(models.Model):
-    """
-    FlightDeclaration model represents a flight declaration with various attributes and methods to manage its state and history.
-    Attributes:
-        id (UUIDField): Primary key, unique identifier for the flight declaration.
-        operational_intent (TextField): Description of the operational intent.
-        flight_declaration_raw_geojson (TextField): Raw GeoJSON data for the flight declaration, optional.
-        type_of_operation (IntegerField): Type of operation, choices are VLOS and BVLOS.
-        bounds (CharField): Geographical bounds of the operation.
-        aircraft_id (CharField): ID of the aircraft for this declaration.
-        state (IntegerField): Current state of the operation.
-        originating_party (CharField): Party originating the flight.
-        submitted_by (EmailField): Email of the person who submitted the declaration, optional.
-        approved_by (EmailField): Email of the person who approved the declaration, optional.
-        latest_telemetry_datetime (DateTimeField): Timestamp of the last received telemetry for this operation, optional.
-        start_datetime (DateTimeField): Start time of the operation.
-        end_datetime (DateTimeField): End time of the operation.
-        is_approved (BooleanField): Approval status of the flight declaration.
-        created_at (DateTimeField): Timestamp when the declaration was created.
-        updated_at (DateTimeField): Timestamp when the declaration was last updated.
-    Methods:
-        add_state_history_entry(original_state: int, new_state: int, notes: str = "", **kwargs):
-            Adds a history tracking entry for this FlightDeclaration.
-        get_state_history() -> List[int]:
-            Retrieves the state history of the flight declaration and parses it to build a transition list.
-        __unicode__():
-            Returns a string representation of the flight declaration for unicode support.
-        __str__():
-            Returns a string representation of the flight declaration.
-    """
+class FlightDeclaration(Base):
+    __tablename__ = "flight_declaration"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    operational_intent = models.TextField()
-    flight_declaration_raw_geojson = models.TextField(null=True, blank=True)
-    type_of_operation = models.IntegerField(
-        choices=OPERATION_TYPES,
-        default=1,
-        help_text="At the moment, only Visual Line of Sight (VLOS) and Beyond Visual Line of Sight (BVLOS) operations are supported, for other types of operations, please issue a pull-request",
-    )
-    bounds = models.CharField(max_length=140)
-    aircraft_id = models.CharField(
-        max_length=256,
-        help_text="Specify the ID of the aircraft for this declaration",
-    )
-    state = models.IntegerField(choices=OPERATION_STATES, default=0, help_text="Set the state of operation")
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operational_intent = Column(Text, nullable=False)
+    flight_declaration_raw_geojson = Column(Text, nullable=True)
+    type_of_operation = Column(Integer, default=1)
+    bounds = Column(String(140), nullable=False)
+    aircraft_id = Column(String(256), nullable=False)
+    state = Column(Integer, default=0)
 
-    originating_party = models.CharField(
-        max_length=100,
-        help_text="Set the party originating this flight, you can add details e.g. Aerobridge Flight 105",
-        default="Flight Blender Default",
-    )
+    originating_party = Column(String(100), default="Flight Blender Default")
 
-    submitted_by = models.EmailField(blank=True, null=True)
-    approved_by = models.EmailField(blank=True, null=True)
+    submitted_by = Column(String(254), nullable=True)
+    approved_by = Column(String(254), nullable=True)
 
-    latest_telemetry_datetime = models.DateTimeField(
-        help_text="The time at which the last telemetry was received for this operation, this is used to determine operational conformance",
-        blank=True,
-        null=True,
-    )
+    latest_telemetry_datetime = Column(DateTime, nullable=True)
 
-    start_datetime = models.DateTimeField(default=datetime.now)
-    end_datetime = models.DateTimeField(default=datetime.now)
+    start_datetime = Column(DateTime, default=datetime.now)
+    end_datetime = Column(DateTime, default=datetime.now)
 
-    is_approved = models.BooleanField(default=False)
+    is_approved = Column(Boolean, default=False)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    class Meta:
-        ordering = ["-created_at"]
+    tracking_info = relationship("FlightOperationTracking", back_populates="flight_declaration")
 
     def add_state_history_entry(self, original_state: int, new_state: int, notes: str = "", **kwargs):
-        """Add a history tracking entry for this FlightDeclaration.
-        Args:
-            user (User): The user performing this action # Not implemented
-            notes (str, optional): URL associated with this tracking entry. Defaults to ''.
-        """
-
+        """Add a history tracking entry for this FlightDeclaration."""
         original_state = original_state or "start"
         deltas = {"original_state": str(original_state), "new_state": str(new_state)}
 
-        entry = FlightOperationTracking.objects.create(
-            flight_declaration=self,
+        entry = FlightOperationTracking(
+            flight_declaration_id=self.id,
             notes=notes,
             deltas=deltas,
         )
-
-        entry.save()
-
-    def get_state_history(self) -> list[int]:
-        """
-        This method gets the state history of a flight declaration and then parses it to build a transition
-        """
-        all_states = []
-        historic_states = FlightOperationTracking.objects.filter(flight_declaration=self).order_by("created_at")
-        for historic_state in historic_states:
-            delta = historic_state.deltas
-            original_state = delta.get("original_state", "start")
-            new_state = delta.get("new_state", "start")
-            if original_state == "start":
-                original_state = -1
-            all_states.append(int(original_state))
-            all_states.append(int(new_state))
-        distinct_states = [k for k, g in itertools.groupby(all_states)]
-        return distinct_states
+        return entry
 
     def __unicode__(self):
         return self.originating_party + " " + str(self.id)
@@ -122,229 +56,156 @@ class FlightDeclaration(models.Model):
         return self.originating_party + " " + str(self.id)
 
 
-class FlightOperationalIntentDetail(models.Model):
-    """
-    Model representing a flight authorization.
-    Attributes:
-        id (UUIDField): Primary key, unique identifier for the flight authorization.
-        declaration (OneToOneField): One-to-one relationship with FlightDeclaration, deleted on cascade.
-        dss_operational_intent_reference_id (CharField): Operational intent ID shared on the DSS, optional.
-        created_at (DateTimeField): Timestamp when the flight authorization was created, auto-generated.
-        updated_at (DateTimeField): Timestamp when the flight authorization was last updated, auto-generated.
-    Methods:
-        __unicode__(): Returns a string representation of the flight authorization.
-    """
+class FlightOperationalIntentDetail(Base):
+    __tablename__ = "flight_operational_intent_detail"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    declaration = models.OneToOneField(FlightDeclaration, on_delete=models.CASCADE)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"), unique=True)
 
-    volumes = models.TextField(blank=True)
-    off_nominal_volumes = models.TextField(blank=True)
-    priority = models.IntegerField()
-    subscribers = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    volumes = Column(Text, default="")
+    off_nominal_volumes = Column(Text, default="")
+    priority = Column(Integer, nullable=False)
+    subscribers = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    is_live = models.BooleanField(
-        default=False,
-        help_text="Set to true if the operational intent is live",
-    )
+    is_live = Column(Boolean, default=False)
 
-    class Meta:
-        ordering = ["-created_at"]
+    declaration = relationship("FlightDeclaration")
 
 
-class FlightOperationalIntentReference(models.Model):
-    """
-    Model representing a flight authorization.
-    Attributes:
-        id (UUIDField): Primary key, unique identifier for the flight authorization.
-        declaration (OneToOneField): One-to-one relationship with FlightDeclaration, deleted on cascade.
-        dss_operational_intent_reference_id (CharField): Operational intent ID shared on the DSS, optional.
-        created_at (DateTimeField): Timestamp when the flight authorization was created, auto-generated.
-        updated_at (DateTimeField): Timestamp when the flight authorization was last updated, auto-generated.
-    Methods:
-        __unicode__(): Returns a string representation of the flight authorization.
-    """
+class FlightOperationalIntentReference(Base):
+    __tablename__ = "flight_operational_intent_reference"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    declaration = models.OneToOneField(FlightDeclaration, on_delete=models.CASCADE)
-    uss_availability = models.CharField(max_length=256)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"), unique=True)
+    uss_availability = Column(String(256), nullable=False)
 
-    ovn = models.CharField(
-        max_length=128,
-        blank=True,
-        null=True,
-        help_text="Once the operational intent is created, the OVN is stored here.",
-    )
+    ovn = Column(String(128), nullable=True)
 
-    manager = models.CharField(
-        max_length=256,
-    )
-    uss_base_url = models.CharField(
-        max_length=256,
-        help_text="USS base URL",
-    )
-    version = models.CharField(max_length=256, help_text="USS base URL")
-    state = models.CharField(max_length=40)
-    time_start = models.DateTimeField(default=datetime.now)
-    time_end = models.DateTimeField(default=datetime.now)
-    subscription_id = models.CharField(max_length=256)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    manager = Column(String(256), nullable=False)
+    uss_base_url = Column(String(256), nullable=False)
+    version = Column(String(256), nullable=False)
+    state = Column(String(40), nullable=False)
+    time_start = Column(DateTime, default=datetime.now)
+    time_end = Column(DateTime, default=datetime.now)
+    subscription_id = Column(String(256), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    is_live = models.BooleanField(
-        default=False,
-        help_text="Set to true if the operational intent is live",
-    )
+    is_live = Column(Boolean, default=False)
 
-    class Meta:
-        ordering = ["-created_at"]
+    declaration = relationship("FlightDeclaration")
+    subscribers = relationship("Subscriber", back_populates="operational_intent_reference")
 
 
-class Subscriber(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    operational_intent_reference = models.ForeignKey(FlightOperationalIntentReference, on_delete=models.CASCADE, related_name="subscribers")
-    subscriptions = models.TextField(blank=True)
-    uss_base_url = models.CharField(
-        max_length=256,
-        help_text="USS base URL",
-    )
+class Subscriber(Base):
+    __tablename__ = "subscriber"
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    operational_intent_reference_id = Column(UUID(as_uuid=True), ForeignKey("flight_operational_intent_reference.id"))
+    subscriptions = Column(Text, default="")
+    uss_base_url = Column(String(256), nullable=False)
 
-    class Meta:
-        ordering = ["-created_at"]
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    operational_intent_reference = relationship("FlightOperationalIntentReference", back_populates="subscribers")
 
 
-class CompositeOperationalIntent(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    declaration = models.OneToOneField(FlightDeclaration, on_delete=models.CASCADE)
-    bounds = models.CharField(max_length=140)
-    start_datetime = models.DateTimeField(default=datetime.now)
-    end_datetime = models.DateTimeField(default=datetime.now)
-    alt_max = models.FloatField()
-    alt_min = models.FloatField()
-    operational_intent_details = models.ForeignKey(
-        FlightOperationalIntentDetail, on_delete=models.CASCADE, related_name="composite_operational_intent"
-    )
-    operational_intent_reference = models.ForeignKey(
-        FlightOperationalIntentReference, on_delete=models.CASCADE, related_name="composite_operational_intent_reference"
-    )
+class CompositeOperationalIntent(Base):
+    __tablename__ = "composite_operational_intent"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"), unique=True)
+    bounds = Column(String(140), nullable=False)
+    start_datetime = Column(DateTime, default=datetime.now)
+    end_datetime = Column(DateTime, default=datetime.now)
+    alt_max = Column(Float, nullable=False)
+    alt_min = Column(Float, nullable=False)
+    operational_intent_details_id = Column(UUID(as_uuid=True), ForeignKey("flight_operational_intent_detail.id"))
+    operational_intent_reference_id = Column(UUID(as_uuid=True), ForeignKey("flight_operational_intent_reference.id"))
+
+    declaration = relationship("FlightDeclaration")
+    operational_intent_details = relationship("FlightOperationalIntentDetail")
+    operational_intent_reference = relationship("FlightOperationalIntentReference")
 
 
-class PeerOperationalIntentDetail(models.Model):
-    "Store the details of the operational intent shared by the peer USS"
+class PeerOperationalIntentDetail(Base):
+    """Store the details of the operational intent shared by the peer USS"""
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    __tablename__ = "peer_operational_intent_detail"
 
-    volumes = models.TextField(blank=True)
-    off_nominal_volumes = models.TextField(blank=True)
-    priority = models.IntegerField()
-    subscribers = models.TextField(blank=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    is_live = models.BooleanField(
-        default=False,
-        help_text="Set to true if the operational intent is live",
-    )
+    volumes = Column(Text, default="")
+    off_nominal_volumes = Column(Text, default="")
+    priority = Column(Integer, nullable=False)
+    subscribers = Column(Text, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    class Meta:
-        ordering = ["-created_at"]
+    is_live = Column(Boolean, default=False)
 
 
-class PeerOperationalIntentReference(models.Model):
-    "Store the details of the operational intent shared by the peer USS"
+class PeerOperationalIntentReference(Base):
+    """Store the details of the operational intent shared by the peer USS"""
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    __tablename__ = "peer_operational_intent_reference"
 
-    uss_availability = models.CharField(max_length=256)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    ovn = models.CharField(
-        max_length=128,
-        blank=True,
-        null=True,
-        help_text="Once the operational intent is created, the OVN is stored here.",
-    )
+    uss_availability = Column(String(256), nullable=False)
 
-    manager = models.CharField(
-        max_length=256,
-    )
-    uss_base_url = models.CharField(
-        max_length=256,
-        help_text="USS base URL",
-    )
-    version = models.CharField(max_length=256, help_text="USS base URL")
-    state = models.CharField(max_length=40)
-    time_start = models.DateTimeField(default=datetime.now)
-    time_end = models.DateTimeField(default=datetime.now)
-    subscription_id = models.CharField(max_length=256)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    ovn = Column(String(128), nullable=True)
 
-    is_live = models.BooleanField(
-        default=False,
-        help_text="Set to true if the operational intent is live",
-    )
+    manager = Column(String(256), nullable=False)
+    uss_base_url = Column(String(256), nullable=False)
+    version = Column(String(256), nullable=False)
+    state = Column(String(40), nullable=False)
+    time_start = Column(DateTime, default=datetime.now)
+    time_end = Column(DateTime, default=datetime.now)
+    subscription_id = Column(String(256), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    class Meta:
-        ordering = ["-created_at"]
+    is_live = Column(Boolean, default=False)
 
 
-class PeerCompositeOperationalIntent(models.Model):
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+class PeerCompositeOperationalIntent(Base):
+    __tablename__ = "peer_composite_operational_intent"
 
-    bounds = models.CharField(max_length=140)
-    start_datetime = models.DateTimeField(default=datetime.now)
-    end_datetime = models.DateTimeField(default=datetime.now)
-    alt_max = models.FloatField()
-    alt_min = models.FloatField()
-    operational_intent_details = models.ForeignKey(
-        PeerOperationalIntentDetail, on_delete=models.CASCADE, related_name="peer_composite_operational_intent"
-    )
-    operational_intent_reference = models.ForeignKey(
-        PeerOperationalIntentReference, on_delete=models.CASCADE, related_name="peer_composite_operational_intent_reference"
-    )
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    bounds = Column(String(140), nullable=False)
+    start_datetime = Column(DateTime, default=datetime.now)
+    end_datetime = Column(DateTime, default=datetime.now)
+    alt_max = Column(Float, nullable=False)
+    alt_min = Column(Float, nullable=False)
+    operational_intent_details_id = Column(UUID(as_uuid=True), ForeignKey("peer_operational_intent_detail.id"))
+    operational_intent_reference_id = Column(UUID(as_uuid=True), ForeignKey("peer_operational_intent_reference.id"))
+
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    operational_intent_details = relationship("PeerOperationalIntentDetail")
+    operational_intent_reference = relationship("PeerOperationalIntentReference")
 
 
-class FlightOperationTracking(models.Model):
-    """
-    Model representing the tracking of flight operations.
+class FlightOperationTracking(Base):
+    __tablename__ = "flight_operation_tracking"
 
-    Attributes:
-        id (UUIDField): Primary key for the tracking entry, automatically generated.
-        flight_declaration (ForeignKey): Reference to the associated FlightDeclaration, with cascade delete.
-        notes (CharField): Optional notes for the tracking entry, with a maximum length of 512 characters.
-        deltas (JSONField): Optional JSON field to store changes or deltas related to the flight operation.
-        created_at (DateTimeField): Timestamp of when the tracking entry was created, automatically set.
-        updated_at (DateTimeField): Timestamp of the last update to the tracking entry, automatically set.
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    flight_declaration_id = Column(UUID(as_uuid=True), ForeignKey("flight_declaration.id"))
 
-    Methods:
-        __unicode__(): Returns the flight declaration as a string, if available.
-        __str__(): Returns the flight declaration as a string, if available.
-    """
+    notes = Column(String(512), nullable=True)
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    """Stock tracking entry - used for tracking history of a particular Flight Declaration. """
-    flight_declaration = models.ForeignKey(FlightDeclaration, on_delete=models.CASCADE, related_name="tracking_info")
+    deltas = Column(JSON, nullable=True)
 
-    notes = models.CharField(
-        blank=True,
-        null=True,
-        max_length=512,
-        verbose_name=_("Notes"),
-        help_text=_("Entry notes"),
-    )
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    deltas = models.JSONField(null=True, blank=True)
-
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    flight_declaration = relationship("FlightDeclaration", back_populates="tracking_info")
 
     def __unicode__(self):
         return self.flight_declaration if self.flight_declaration else ""
