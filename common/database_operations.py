@@ -7,10 +7,10 @@ from typing import Never, Optional
 from uuid import UUID
 
 import arrow
-from django.db.models import QuerySet
-from django.db.utils import IntegrityError
 from dotenv import find_dotenv, load_dotenv
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from common.utils import EnhancedJSONEncoder
 from conformance_monitoring_operations.models import ConformanceRecord, TaskScheduler
@@ -77,98 +77,101 @@ class FlightBlenderDatabaseReader:
     A file to unify read and write operations to the database. Eventually caching etc. can be added via this file
     """
 
+    def __init__(self, db: Session):
+        self.db = db
+
     def get_peer_operational_intent_details_by_id(self, operational_intent_id: str) -> None | PeerOperationalIntentDetail:
-        try:
-            peer_operational_intent_detail = PeerOperationalIntentDetail.objects.get(id=operational_intent_id)
-            return peer_operational_intent_detail
-        except PeerOperationalIntentDetail.DoesNotExist:
-            return None
+        return self.db.query(PeerOperationalIntentDetail).filter(PeerOperationalIntentDetail.id == operational_intent_id).first()
 
     def get_peer_operational_intent_reference_by_id(self, operational_intent_reference_id: str) -> None | PeerOperationalIntentReference:
-        try:
-            peer_operational_intent_reference = PeerOperationalIntentReference.objects.get(id=operational_intent_reference_id)
-            return peer_operational_intent_reference
-        except PeerOperationalIntentReference.DoesNotExist:
-            return None
+        return self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.id == operational_intent_reference_id).first()
 
     def check_constraint_id_exists(self, constraint_id: str) -> bool:
-        return ConstraintDetail.objects.filter(id=constraint_id).exists()
+        return self.db.query(ConstraintDetail).filter(ConstraintDetail.id == constraint_id).first() is not None
 
-    def get_constraint_by_geofence(self, geofence: GeoFence) -> ConstraintDetail:
-        return ConstraintDetail.objects.filter(geofence=geofence)
+    def get_constraint_by_geofence(self, geofence: GeoFence) -> list[ConstraintDetail]:
+        return self.db.query(ConstraintDetail).filter(ConstraintDetail.geofence_id == geofence.id).all()
 
     def check_constraint_reference_id_exists(self, constraint_reference_id: str) -> bool:
-        return ConstraintReference.objects.filter(id=constraint_reference_id).exists()
+        return self.db.query(ConstraintReference).filter(ConstraintReference.id == constraint_reference_id).first() is not None
 
     def get_constraint_reference_by_id(self, constraint_reference_id: str) -> ConstraintReference:
-        return ConstraintReference.objects.get(id=constraint_reference_id)
+        return self.db.query(ConstraintReference).filter(ConstraintReference.id == constraint_reference_id).first()
 
     def get_constraint_details(self, constraint_id: str) -> ConstraintDetail:
-        return ConstraintDetail.objects.get(id=constraint_id)
+        return self.db.query(ConstraintDetail).filter(ConstraintDetail.id == constraint_id).first()
 
     def get_flight_observations(self, after_datetime: arrow.arrow.Arrow):
-        observations = FlightObservation.objects.filter(created_at__gte=after_datetime.isoformat()).order_by("created_at").values()
+        observations = (
+            self.db.query(FlightObservation)
+            .filter(FlightObservation.created_at >= after_datetime.isoformat())
+            .order_by(FlightObservation.created_at)
+            .all()
+        )
         return observations
 
     def get_closest_flight_observation_for_now(self, now: arrow.arrow.Arrow):
         one_second_before_now = now.shift(seconds=-1)
 
-        observations = FlightObservation.objects.filter(
-            created_at__gte=one_second_before_now.isoformat(),
-            created_at__lte=now.isoformat(),
-        )
+        observations = self.db.query(FlightObservation).filter(
+            FlightObservation.created_at >= one_second_before_now.isoformat(),
+            FlightObservation.created_at <= now.isoformat(),
+        ).all()
         return observations
 
     def get_flight_observation_objects(self):
-        observations = FlightObservation.objects.all().order_by("created_at").values()
+        observations = self.db.query(FlightObservation).order_by(FlightObservation.created_at).all()
         return observations
 
     def get_temporal_flight_observations_by_session(self, session_id: str, after_datetime: arrow.arrow.Arrow):
         observations = (
-            FlightObservation.objects.filter(session_id=session_id, created_at__gte=after_datetime.isoformat()).order_by("created_at").values()
+            self.db.query(FlightObservation)
+            .filter(
+                FlightObservation.session_id == session_id,
+                FlightObservation.created_at >= after_datetime.isoformat(),
+            )
+            .order_by(FlightObservation.created_at)
+            .all()
         )
         return observations
 
     def get_flight_observations_by_session(self, session_id: str, after_datetime: arrow.arrow.Arrow):
         observations = (
-            FlightObservation.objects.filter(session_id=session_id, created_at__gte=after_datetime.isoformat())
-            .exclude(traffic_source=11)
-            .order_by("created_at")
-            .values()
+            self.db.query(FlightObservation)
+            .filter(
+                FlightObservation.session_id == session_id,
+                FlightObservation.created_at >= after_datetime.isoformat(),
+                FlightObservation.traffic_source != 11,
+            )
+            .order_by(FlightObservation.created_at)
+            .all()
         )
         return observations
 
     def get_latest_flight_observation_by_session(self, session_id: str):
-        try:
-            observation = FlightObservation.objects.filter(session_id=session_id).latest("created_at")
-        except FlightObservation.DoesNotExist:
-            return None
+        observation = (
+            self.db.query(FlightObservation)
+            .filter(FlightObservation.session_id == session_id)
+            .order_by(FlightObservation.created_at.desc())
+            .first()
+        )
         return observation
 
     def get_all_flight_declarations(self) -> list[FlightDeclaration]:
-        flight_declarations = FlightDeclaration.objects.all()
+        flight_declarations = self.db.query(FlightDeclaration).all()
         return flight_declarations
 
     def check_flight_declaration_exists(self, flight_declaration_id: str) -> bool:
-        return FlightDeclaration.objects.filter(id=flight_declaration_id).exists()
+        return self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first() is not None
 
     def get_flight_declaration_by_id(self, flight_declaration_id: str) -> None | FlightDeclaration:
-        try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
-            return flight_declaration
-        except FlightDeclaration.DoesNotExist:
-            return None
+        return self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
 
     def check_composite_operational_intent_exists(self, flight_declaration_id: str) -> bool:
-        composite_operational_intent_exists = CompositeOperationalIntent.objects.filter(declaration=flight_declaration_id).exists()
-        return composite_operational_intent_exists
+        return self.db.query(CompositeOperationalIntent).filter(CompositeOperationalIntent.declaration_id == flight_declaration_id).first() is not None
 
     def get_composite_operational_intent_by_declaration_id(self, flight_declaration_id: str) -> None | CompositeOperationalIntent:
-        try:
-            return CompositeOperationalIntent.objects.get(declaration__id=flight_declaration_id)
-
-        except CompositeOperationalIntent.DoesNotExist:
-            return None
+        return self.db.query(CompositeOperationalIntent).filter(CompositeOperationalIntent.declaration_id == flight_declaration_id).first()
 
     def get_flight_operational_intent_reference_by_flight_declaration_id(self, flight_declaration_id: str) -> None | FlightOperationalIntentReference:
         """
@@ -182,36 +185,38 @@ class FlightBlenderDatabaseReader:
             FlightAuthorization.DoesNotExist: If the flight authorization for the given flight declaration does not exist.
         """
 
-        try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
-            flight_operational_intent_reference = FlightOperationalIntentReference.objects.get(declaration=flight_declaration)
-            return flight_operational_intent_reference
-        except FlightDeclaration.DoesNotExist:
+        flight_declaration = self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
+        if flight_declaration is None:
             return None
-        except FlightOperationalIntentReference.DoesNotExist:
-            return None
+        flight_operational_intent_reference = (
+            self.db.query(FlightOperationalIntentReference)
+            .filter(FlightOperationalIntentReference.declaration_id == flight_declaration.id)
+            .first()
+        )
+        return flight_operational_intent_reference
 
     def get_active_geofences(self) -> None | list[GeoFence]:
         now = arrow.now()
 
-        return GeoFence.objects.filter(start_datetime__lte=now.isoformat(), end_datetime__gte=now.isoformat())
+        return self.db.query(GeoFence).filter(
+            GeoFence.start_datetime <= now.isoformat(),
+            GeoFence.end_datetime >= now.isoformat(),
+        ).all()
 
     def get_flight_operational_intent_reference_by_flight_declaration_obj(
         self, flight_declaration: FlightDeclaration
     ) -> None | FlightOperationalIntentReference:
-        try:
-            flight_operational_intent_reference = FlightOperationalIntentReference.objects.get(declaration=flight_declaration)
-            return flight_operational_intent_reference
-        except FlightDeclaration.DoesNotExist:
-            return None
-        except FlightOperationalIntentReference.DoesNotExist:
-            return None
+        return (
+            self.db.query(FlightOperationalIntentReference)
+            .filter(FlightOperationalIntentReference.declaration_id == flight_declaration.id)
+            .first()
+        )
 
     def check_flight_operational_intent_reference_by_id_exists(self, operational_intent_ref_id: str) -> bool:
-        return FlightOperationalIntentReference.objects.filter(id=operational_intent_ref_id).exists()
+        return self.db.query(FlightOperationalIntentReference).filter(FlightOperationalIntentReference.id == operational_intent_ref_id).first() is not None
 
     def get_operational_intent_reference_by_id(self, operational_intent_ref_id: str) -> FlightOperationalIntentReference:
-        return FlightOperationalIntentReference.objects.get(id=operational_intent_ref_id)
+        return self.db.query(FlightOperationalIntentReference).filter(FlightOperationalIntentReference.id == operational_intent_ref_id).first()
 
     def get_flight_operational_intent_reference_by_id(self, operational_intent_ref_id: str) -> None | FlightOperationalIntentReference:
         """
@@ -225,18 +230,14 @@ class FlightBlenderDatabaseReader:
             FlightOperationalIntentReference.DoesNotExist: If the flight authorization for the given flight declaration does not exist.
         """
 
-        try:
-            flight_operational_intent_reference = FlightOperationalIntentReference.objects.get(id=operational_intent_ref_id)
-            return flight_operational_intent_reference
-        except FlightOperationalIntentReference.DoesNotExist:
-            return None
+        return self.db.query(FlightOperationalIntentReference).filter(FlightOperationalIntentReference.id == operational_intent_ref_id).first()
 
     def get_operational_intent_details_by_flight_declaration(self, flight_declaration: FlightDeclaration) -> None | FlightOperationalIntentDetail:
-        try:
-            flight_operational_intent_detail = FlightOperationalIntentDetail.objects.get(declaration=flight_declaration)
-            return flight_operational_intent_detail
-        except FlightOperationalIntentDetail.DoesNotExist:
-            return None
+        return (
+            self.db.query(FlightOperationalIntentDetail)
+            .filter(FlightOperationalIntentDetail.declaration_id == flight_declaration.id)
+            .first()
+        )
 
     def update_flight_operational_intent_reference_ovn(
         self,
@@ -245,23 +246,27 @@ class FlightBlenderDatabaseReader:
     ) -> bool:
         try:
             flight_operational_intent_referecne.ovn = ovn
-            flight_operational_intent_referecne.save()
+            self.db.add(flight_operational_intent_referecne)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_referecne)
             return True
 
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def get_subscribers_of_operational_intent_reference(
         self, flight_operational_intent_reference: FlightOperationalIntentReference
     ) -> Never | list[Subscriber]:
-        try:
-            subscribers = Subscriber.objects.filter(operational_intent_reference=flight_operational_intent_reference)
-            return subscribers
-        except Subscriber.DoesNotExist:
-            return None
+        subscribers = (
+            self.db.query(Subscriber)
+            .filter(Subscriber.operational_intent_reference_id == flight_operational_intent_reference.id)
+            .all()
+        )
+        return subscribers
 
     def check_flight_operational_intent_details_by_id_exists(self, operational_intent_ref_id: str) -> bool:
-        return FlightOperationalIntentDetail.objects.filter(id=operational_intent_ref_id).exists()
+        return self.db.query(FlightOperationalIntentDetail).filter(FlightOperationalIntentDetail.id == operational_intent_ref_id).first() is not None
 
     def get_operational_intent_details_by_flight_declaration_id(self, declaration_id: str) -> None | FlightOperationalIntentDetail:
         """
@@ -275,23 +280,16 @@ class FlightBlenderDatabaseReader:
             FlightOperationalIntentReference.DoesNotExist: If the flight authorization for the given flight declaration does not exist.
         """
 
-        try:
-            flight_operational_intent_detail = FlightOperationalIntentDetail.objects.get(declaration__id=declaration_id)
-            return flight_operational_intent_detail
-        except FlightOperationalIntentDetail.DoesNotExist:
-            return None
+        return self.db.query(FlightOperationalIntentDetail).filter(FlightOperationalIntentDetail.declaration_id == declaration_id).first()
 
     def get_geofence_by_constraint_reference_id(self, constraint_reference_id: str) -> None | GeoFence:
-        try:
-            constraint_reference = ConstraintReference.objects.get(id=constraint_reference_id)
-            geofence = GeoFence.objects.get(id=constraint_reference.geofence.id)
-            return geofence
-        except ConstraintReference.DoesNotExist:
+        constraint_reference = self.db.query(ConstraintReference).filter(ConstraintReference.id == constraint_reference_id).first()
+        if constraint_reference is None:
             return None
-        except GeoFence.DoesNotExist:
-            return None
+        geofence = self.db.query(GeoFence).filter(GeoFence.id == constraint_reference.geofence_id).first()
+        return geofence
 
-    def get_conformance_records_for_duration(self, start_time: datetime, end_time: datetime) -> None | QuerySet | list[ConformanceRecord]:
+    def get_conformance_records_for_duration(self, start_time: datetime, end_time: datetime) -> None | list[ConformanceRecord]:
         """
         Retrieves conformance records created within the specified time duration.
         This method queries the ConformanceRecord model to fetch records where the
@@ -301,208 +299,250 @@ class FlightBlenderDatabaseReader:
             start_time (datetime): The start of the time range for filtering records.
             end_time (datetime): The end of the time range for filtering records.
         Returns:
-            None | QuerySet | list[ConformanceRecord]: A QuerySet of ConformanceRecord
+            None | list[ConformanceRecord]: A list of ConformanceRecord
             objects if records are found, or None if no records exist (though note that
             the exception handling may not trigger as expected for filter queries).
-        Raises:
-            ConformanceRecord.DoesNotExist: If the query fails due to model issues,
-            though this is unlikely for a filter operation.
         """
 
-        try:
-            conformance_records = ConformanceRecord.objects.filter(created_at__gte=start_time, created_at__lte=end_time).order_by("-created_at")
-            return conformance_records
-        except ConformanceRecord.DoesNotExist:
-            return None
+        conformance_records = (
+            self.db.query(ConformanceRecord)
+            .filter(
+                ConformanceRecord.created_at >= start_time,
+                ConformanceRecord.created_at <= end_time,
+            )
+            .order_by(ConformanceRecord.created_at.desc())
+            .all()
+        )
+        return conformance_records
 
-    def get_conformance_record_by_flight_declaration(self, flight_declaration: FlightDeclaration) -> None | QuerySet:
-        try:
-            conformance_record = ConformanceRecord.objects.filter(flight_declaration=flight_declaration)
-            return conformance_record
-        except ConformanceRecord.DoesNotExist:
-            return None
+    def get_conformance_record_by_flight_declaration(self, flight_declaration: FlightDeclaration) -> None | list[ConformanceRecord]:
+        conformance_record = (
+            self.db.query(ConformanceRecord)
+            .filter(ConformanceRecord.flight_declaration_id == flight_declaration.id)
+            .all()
+        )
+        return conformance_record
 
     def check_flight_declaration_active(self, flight_declaration_id: str, now: datetime) -> bool:
-        return FlightDeclaration.objects.filter(
-            id=flight_declaration_id,
-            start_datetime__lte=now,
-            end_datetime__gte=now,
-        ).exists()
+        return (
+            self.db.query(FlightDeclaration)
+            .filter(
+                FlightDeclaration.id == flight_declaration_id,
+                FlightDeclaration.start_datetime <= now,
+                FlightDeclaration.end_datetime >= now,
+            )
+            .first()
+            is not None
+        )
 
     def check_active_activated_flights_exist(self) -> bool:
-        return FlightDeclaration.objects.filter().filter(state__in=[1, 2]).exists()
+        return self.db.query(FlightDeclaration).filter(FlightDeclaration.state.in_([1, 2])).first() is not None
 
     def get_active_activated_flight_declarations(
         self,
-    ) -> QuerySet | list[FlightDeclaration]:
-        return FlightDeclaration.objects.filter().filter(state__in=[1, 2])
+    ) -> list[FlightDeclaration]:
+        return self.db.query(FlightDeclaration).filter(FlightDeclaration.state.in_([1, 2])).all()
 
-    def get_current_flight_accepted_activated_declaration_ids(self, now: str) -> None | UUID:
+    def get_current_flight_accepted_activated_declaration_ids(self, now: str) -> list:
         """This method gets flight operation ids that are active in the system"""
         n = arrow.get(now)
 
         two_minutes_before_now = n.shift(seconds=-120).isoformat()
         five_hours_from_now = n.shift(minutes=300).isoformat()
-        relevant_ids = (
-            FlightDeclaration.objects.filter(
-                start_datetime__gte=two_minutes_before_now,
-                end_datetime__lte=five_hours_from_now,
+        relevant_ids = [
+            r[0]
+            for r in self.db.query(FlightDeclaration.id)
+            .filter(
+                FlightDeclaration.start_datetime >= two_minutes_before_now,
+                FlightDeclaration.end_datetime <= five_hours_from_now,
+                FlightDeclaration.state.in_([1, 2]),
             )
-            .filter(state__in=[1, 2])
-            .values_list("id", flat=True)
-        )
+            .all()
+        ]
         return relevant_ids
 
     def check_flight_details_exist(self, flight_detail_id: str) -> bool:
-        return RIDFlightDetail.objects.filter(id=flight_detail_id).exists()
+        return self.db.query(RIDFlightDetail).filter(RIDFlightDetail.id == flight_detail_id).first() is not None
 
     def get_flight_details_by_id(self, flight_detail_id: str) -> RIDFlightDetail:
-        return RIDFlightDetail.objects.get(id=flight_detail_id)
+        return self.db.query(RIDFlightDetail).filter(RIDFlightDetail.id == flight_detail_id).first()
 
     def get_conformance_monitoring_task(self, flight_declaration: FlightDeclaration) -> None | TaskScheduler:
-        try:
-            return TaskScheduler.objects.get(flight_declaration=flight_declaration)
-        except TaskScheduler.DoesNotExist:
-            return None
+        return (
+            self.db.query(TaskScheduler)
+            .filter(TaskScheduler.flight_declaration_id == flight_declaration.id)
+            .first()
+        )
 
     def get_rid_monitoring_task(self, session_id: UUID) -> None | TaskScheduler:
-        try:
-            return TaskScheduler.objects.get(session_id=session_id)
-        except TaskScheduler.DoesNotExist:
-            return None
+        return self.db.query(TaskScheduler).filter(TaskScheduler.session_id == session_id).first()
 
-    def get_active_rid_observations_for_view(self, start_time: datetime, end_time: datetime) -> None | QuerySet | list[FlightObservation]:
-        try:
-            observations = FlightObservation.objects.filter(created_at__gte=start_time, created_at__lte=end_time, traffic_source=11).order_by(
-                "-created_at"
+    def get_active_rid_observations_for_view(self, start_time: datetime, end_time: datetime) -> None | list[FlightObservation]:
+        observations = (
+            self.db.query(FlightObservation)
+            .filter(
+                FlightObservation.created_at >= start_time,
+                FlightObservation.created_at <= end_time,
+                FlightObservation.traffic_source == 11,
             )
-            return observations
-        except FlightObservation.DoesNotExist:
-            return None
+            .order_by(FlightObservation.created_at.desc())
+            .all()
+        )
+        return observations
 
-    def get_active_rid_observations_for_session(self, session_id: str) -> None | QuerySet | list[FlightObservation]:
-        try:
-            observations = FlightObservation.objects.filter(session_id=session_id, traffic_source=11).order_by("-created_at")
-            return observations
-        except FlightObservation.DoesNotExist:
-            return None
+    def get_active_rid_observations_for_session(self, session_id: str) -> None | list[FlightObservation]:
+        observations = (
+            self.db.query(FlightObservation)
+            .filter(
+                FlightObservation.session_id == session_id,
+                FlightObservation.traffic_source == 11,
+            )
+            .order_by(FlightObservation.created_at.desc())
+            .all()
+        )
+        return observations
 
     def get_active_rid_observations_for_session_between_interval(
         self, start_time: datetime, end_time: datetime, session_id: str
-    ) -> None | QuerySet | list[FlightObservation]:
-        try:
-            observations = FlightObservation.objects.filter(
-                session_id=session_id,
-                created_at__gte=start_time,
-                created_at__lte=end_time,
-                traffic_source=11,
+    ) -> None | list[FlightObservation]:
+        observations = (
+            self.db.query(FlightObservation)
+            .filter(
+                FlightObservation.session_id == session_id,
+                FlightObservation.created_at >= start_time,
+                FlightObservation.created_at <= end_time,
+                FlightObservation.traffic_source == 11,
             )
-            return observations
-        except FlightObservation.DoesNotExist:
-            return None
+            .all()
+        )
+        return observations
 
-    def get_active_surveillance_sensors(self) -> QuerySet[SurveillanceSensor]:
-        return SurveillanceSensor.objects.filter(is_active=True)
+    def get_active_surveillance_sensors(self) -> list[SurveillanceSensor]:
+        return self.db.query(SurveillanceSensor).filter(SurveillanceSensor.is_active == True).all()  # noqa: E712
 
     def get_surveillance_sensor_by_id(self, sensor_id: UUID) -> SurveillanceSensor | None:
-        sensor_exists = SurveillanceSensor.objects.filter(id=sensor_id).exists()
-        if not sensor_exists:
-            return None
-
-        return SurveillanceSensor.objects.get(id=sensor_id)
+        return self.db.query(SurveillanceSensor).filter(SurveillanceSensor.id == sensor_id).first()
 
     def get_surveillance_session_by_id(self, session_id: str) -> None | SurveillanceSession:
-        try:
-            return SurveillanceSession.objects.get(id=session_id)
-        except SurveillanceSession.DoesNotExist:
-            return None
+        return self.db.query(SurveillanceSession).filter(SurveillanceSession.id == session_id).first()
 
-    def get_surveillance_periodic_tasks_by_session_id(self, session_id: str) -> QuerySet[TaskScheduler]:
-        return TaskScheduler.objects.filter(session_id=session_id)
+    def get_surveillance_periodic_tasks_by_session_id(self, session_id: str) -> list[TaskScheduler]:
+        return self.db.query(TaskScheduler).filter(TaskScheduler.session_id == session_id).all()
 
-    def get_all_active_surveillance_sessions(self) -> QuerySet[SurveillanceSession]:
+    def get_all_active_surveillance_sessions(self) -> list[SurveillanceSession]:
         now = arrow.now().datetime
-        return SurveillanceSession.objects.filter(valid_until__gte=now)
+        return self.db.query(SurveillanceSession).filter(SurveillanceSession.valid_until >= now).all()
 
     def get_sensor_health_record(self, sensor_id: str) -> Optional[SurveillanceSensorHealth]:
-        try:
-            return SurveillanceSensorHealth.objects.get(sensor__id=sensor_id)
-        except SurveillanceSensorHealth.DoesNotExist:
-            return None
+        return self.db.query(SurveillanceSensorHealth).filter(SurveillanceSensorHealth.sensor_id == sensor_id).first()
 
     def get_health_tracking_records_for_sensor(
         self, sensor_id: str, start_time: datetime, end_time: datetime
-    ) -> QuerySet[SurveillanceSensortHealthTracking]:
-        return SurveillanceSensortHealthTracking.objects.filter(
-            sensor__id=sensor_id,
-            recorded_at__gte=start_time,
-            recorded_at__lte=end_time,
-        ).order_by("recorded_at")
+    ) -> list[SurveillanceSensortHealthTracking]:
+        return (
+            self.db.query(SurveillanceSensortHealthTracking)
+            .filter(
+                SurveillanceSensortHealthTracking.sensor_id == sensor_id,
+                SurveillanceSensortHealthTracking.recorded_at >= start_time,
+                SurveillanceSensortHealthTracking.recorded_at <= end_time,
+            )
+            .order_by(SurveillanceSensortHealthTracking.recorded_at)
+            .all()
+        )
 
     def get_sensor_status_before_time(self, sensor_id: str, before_time: datetime) -> Optional[str]:
         record = (
-            SurveillanceSensortHealthTracking.objects.filter(
-                sensor__id=sensor_id,
-                recorded_at__lt=before_time,
+            self.db.query(SurveillanceSensortHealthTracking)
+            .filter(
+                SurveillanceSensortHealthTracking.sensor_id == sensor_id,
+                SurveillanceSensortHealthTracking.recorded_at < before_time,
             )
-            .order_by("-recorded_at")
+            .order_by(SurveillanceSensortHealthTracking.recorded_at.desc())
             .first()
         )
         return record.status if record else None
 
-    def get_heartbeat_events_for_session(self, session_id: str, start_time: datetime, end_time: datetime) -> QuerySet[SurveillanceHeartbeatEvent]:
-        return SurveillanceHeartbeatEvent.objects.filter(
-            session__id=session_id,
-            dispatched_at__gte=start_time,
-            dispatched_at__lte=end_time,
-        ).order_by("dispatched_at")
+    def get_heartbeat_events_for_session(self, session_id: str, start_time: datetime, end_time: datetime) -> list[SurveillanceHeartbeatEvent]:
+        return (
+            self.db.query(SurveillanceHeartbeatEvent)
+            .filter(
+                SurveillanceHeartbeatEvent.session_id == session_id,
+                SurveillanceHeartbeatEvent.dispatched_at >= start_time,
+                SurveillanceHeartbeatEvent.dispatched_at <= end_time,
+            )
+            .order_by(SurveillanceHeartbeatEvent.dispatched_at)
+            .all()
+        )
 
-    def get_track_events_for_session(self, session_id: str, start_time: datetime, end_time: datetime) -> QuerySet[SurveillanceTrackEvent]:
-        return SurveillanceTrackEvent.objects.filter(
-            session__id=session_id,
-            dispatched_at__gte=start_time,
-            dispatched_at__lte=end_time,
-        ).order_by("dispatched_at")
+    def get_track_events_for_session(self, session_id: str, start_time: datetime, end_time: datetime) -> list[SurveillanceTrackEvent]:
+        return (
+            self.db.query(SurveillanceTrackEvent)
+            .filter(
+                SurveillanceTrackEvent.session_id == session_id,
+                SurveillanceTrackEvent.dispatched_at >= start_time,
+                SurveillanceTrackEvent.dispatched_at <= end_time,
+            )
+            .order_by(SurveillanceTrackEvent.dispatched_at)
+            .all()
+        )
 
     def get_failure_notifications_for_sensor(
         self, sensor_id: str, start_time: datetime, end_time: datetime
-    ) -> QuerySet[SurveillanceSensorFailureNotification]:
-        return SurveillanceSensorFailureNotification.objects.filter(
-            sensor__id=sensor_id,
-            created_at__gte=start_time,
-            created_at__lte=end_time,
-        ).order_by("-created_at")
+    ) -> list[SurveillanceSensorFailureNotification]:
+        return (
+            self.db.query(SurveillanceSensorFailureNotification)
+            .filter(
+                SurveillanceSensorFailureNotification.sensor_id == sensor_id,
+                SurveillanceSensorFailureNotification.created_at >= start_time,
+                SurveillanceSensorFailureNotification.created_at <= end_time,
+            )
+            .order_by(SurveillanceSensorFailureNotification.created_at.desc())
+            .all()
+        )
 
     def get_active_user_notifications_between_interval(
         self, start_time: datetime, end_time: datetime
-    ) -> None | QuerySet | list[OperatorRIDNotification]:
-        try:
-            notifications = OperatorRIDNotification.objects.filter(created_at__gte=start_time, created_at__lte=end_time, is_active=True)
-            return notifications
-        except OperatorRIDNotification.DoesNotExist:
-            return None
+    ) -> None | list[OperatorRIDNotification]:
+        notifications = (
+            self.db.query(OperatorRIDNotification)
+            .filter(
+                OperatorRIDNotification.created_at >= start_time,
+                OperatorRIDNotification.created_at <= end_time,
+                OperatorRIDNotification.is_active == True,  # noqa: E712
+            )
+            .all()
+        )
+        return notifications
 
     def check_rid_subscription_record_by_view_hash_exists(self, view_hash: int) -> bool:
-        rid_subscription_exists = ISASubscription.objects.filter(view_hash=view_hash).exists()
-        return rid_subscription_exists
+        return self.db.query(ISASubscription).filter(ISASubscription.view_hash == view_hash).first() is not None
 
     def check_rid_subscription_record_by_subscription_id_exists(self, subscription_id: str) -> bool:
-        rid_subscription_record_exists = ISASubscription.objects.filter(subscription_id=subscription_id).exists()
-        return rid_subscription_record_exists
+        return self.db.query(ISASubscription).filter(ISASubscription.subscription_id == subscription_id).first() is not None
 
     def get_rid_subscription_record_by_subscription_id(self, subscription_id: str) -> ISASubscription:
-        rid_subscription_record = ISASubscription.objects.get(subscription_id=subscription_id)
-        return rid_subscription_record
+        return self.db.query(ISASubscription).filter(ISASubscription.subscription_id == subscription_id).first()
 
-    def get_all_rid_simulated_subscription_records(self) -> QuerySet[ISASubscription]:
+    def get_all_rid_simulated_subscription_records(self) -> list[ISASubscription]:
         now = arrow.now().datetime
-        return ISASubscription.objects.filter(is_simulated=True, end_datetime__gte=now, created_at__lte=now)
+        return (
+            self.db.query(ISASubscription)
+            .filter(
+                ISASubscription.is_simulated == True,  # noqa: E712
+                ISASubscription.end_datetime >= now,
+                ISASubscription.created_at <= now,
+            )
+            .all()
+        )
 
     def get_rid_subscription_record_by_id(self, id: str) -> ISASubscription:
-        return ISASubscription.objects.get(id=id)
+        return self.db.query(ISASubscription).filter(ISASubscription.id == id).first()
 
 
 class FlightBlenderDatabaseWriter:
+    def __init__(self, db: Session):
+        self.db = db
+
     def create_or_update_peer_operational_intent_details(
         self,
         peer_operational_intent_id: str,
@@ -517,9 +557,12 @@ class FlightBlenderDatabaseWriter:
                 off_nominal_volumes=_operational_intent_details["off_nominal_volumes"],
                 priority=operational_intent_details.priority,
             )
-            peer_operational_intent_detail_obj.save()
+            self.db.add(peer_operational_intent_detail_obj)
+            self.db.commit()
+            self.db.refresh(peer_operational_intent_detail_obj)
             return peer_operational_intent_detail_obj
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_or_update_peer_operational_intent_reference(
@@ -539,17 +582,16 @@ class FlightBlenderDatabaseWriter:
                 time_end=peer_operational_intent_reference.time_end.value,
                 subscription_id=peer_operational_intent_reference.subscription_id,
             )
-            peer_operational_intent_reference_obj.save()
+            self.db.add(peer_operational_intent_reference_obj)
+            self.db.commit()
+            self.db.refresh(peer_operational_intent_reference_obj)
             return peer_operational_intent_reference_obj
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def get_peer_operational_intent_reference_by_id(self, operational_intent_reference_id: str) -> None | PeerOperationalIntentReference:
-        try:
-            peer_operational_intent_reference = PeerOperationalIntentReference.objects.get(id=operational_intent_reference_id)
-            return peer_operational_intent_reference
-        except PeerOperationalIntentReference.DoesNotExist:
-            return None
+        return self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.id == operational_intent_reference_id).first()
 
     def write_flight_observation(self, single_observation: SingleAirtrafficObservation) -> bool:
         session_id = single_observation.session_id if single_observation.session_id else "00000000-0000-0000-0000-000000000000"
@@ -564,19 +606,24 @@ class FlightBlenderDatabaseWriter:
                 icao_address=single_observation.icao_address,
                 metadata=json.dumps(single_observation.metadata),
             )
-            flight_observation.save()
+            self.db.add(flight_observation)
+            self.db.commit()
+            self.db.refresh(flight_observation)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def delete_flight_declaration(self, flight_declaration_id: str) -> bool:
         try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
-            flight_declaration.delete()
+            flight_declaration = self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
+            if flight_declaration is None:
+                return False
+            self.db.delete(flight_declaration)
+            self.db.commit()
             return True
-        except FlightDeclaration.DoesNotExist:
-            return False
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_operator_rid_notification(self, operator_rid_notification: OperatorRIDNotificationCreationPayload) -> bool:
@@ -585,9 +632,12 @@ class FlightBlenderDatabaseWriter:
                 message=operator_rid_notification.message,
                 session_id=operator_rid_notification.session_id,
             )
-            operator_rid_notification_obj.save()
+            self.db.add(operator_rid_notification_obj)
+            self.db.commit()
+            self.db.refresh(operator_rid_notification_obj)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_flight_declaration(self, flight_declaration_creation: FlightDeclarationCreationPayload) -> None | FlightDeclaration:
@@ -600,15 +650,20 @@ class FlightBlenderDatabaseWriter:
                 aircraft_id=flight_declaration_creation.aircraft_id,
                 state=flight_declaration_creation.state,
             )
-            flight_declaration.save()
+            self.db.add(flight_declaration)
+            self.db.commit()
+            self.db.refresh(flight_declaration)
             return flight_declaration
 
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def set_flight_declaration_non_conforming(self, flight_declaration: FlightDeclaration):
         flight_declaration.state = 3
-        flight_declaration.save()
+        self.db.add(flight_declaration)
+        self.db.commit()
+        self.db.refresh(flight_declaration)
 
     def create_flight_operational_intent_reference_with_submitted_operational_intent(
         self,
@@ -629,11 +684,14 @@ class FlightBlenderDatabaseWriter:
                 time_end=operational_intent_reference_payload.time_end.value,
                 subscription_id=operational_intent_reference_payload.subscription_id,
             )
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
 
             return flight_operational_intent_reference
 
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_flight_operational_intent_reference_subscribers(
@@ -642,7 +700,11 @@ class FlightBlenderDatabaseWriter:
         subscribers: list[SubscriberToNotify],
     ) -> bool:
         try:
-            flight_operational_intent_reference = FlightOperationalIntentReference.objects.get(declaration=flight_declaration)
+            flight_operational_intent_reference = (
+                self.db.query(FlightOperationalIntentReference)
+                .filter(FlightOperationalIntentReference.declaration_id == flight_declaration.id)
+                .first()
+            )
             if flight_operational_intent_reference is None:
                 return False
             else:
@@ -656,10 +718,12 @@ class FlightBlenderDatabaseWriter:
                         uss_base_url=subscriber.uss_base_url,
                         subscriptions=json.dumps(all_subscriptions),
                     )
-                    subscriber.save()
+                    self.db.add(subscriber)
+                self.db.commit()
 
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_flight_operational_intent_details_with_submitted_operational_intent(
@@ -675,11 +739,14 @@ class FlightBlenderDatabaseWriter:
                 off_nominal_volumes=json.dumps(_operational_intent_details_payload["off_nominal_volumes"]),
                 priority=operational_intent_details_payload.priority,
             )
-            flight_operational_intent_detail_obj.save()
+            self.db.add(flight_operational_intent_detail_obj)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_detail_obj)
 
             return flight_operational_intent_detail_obj
 
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def write_flight_conformance_record(
@@ -702,9 +769,12 @@ class FlightBlenderDatabaseWriter:
                 geofence=geofence,
                 resolved=resolved,
             )
-            conformance_record.save()
+            self.db.add(conformance_record)
+            self.db.commit()
+            self.db.refresh(conformance_record)
             return conformance_record
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_or_update_peer_composite_operational_intent(
@@ -713,8 +783,8 @@ class FlightBlenderDatabaseWriter:
         composite_operational_intent: CompositeOperationalIntentPayload,
     ) -> bool:
         try:
-            peer_operational_intent_details = PeerOperationalIntentDetail.objects.get(id=operation_id)
-            peer_operational_intent_reference = PeerOperationalIntentReference.objects.get(id=operation_id)
+            peer_operational_intent_details = self.db.query(PeerOperationalIntentDetail).filter(PeerOperationalIntentDetail.id == operation_id).first()
+            peer_operational_intent_reference = self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.id == operation_id).first()
             if peer_operational_intent_details is None or peer_operational_intent_reference is None:
                 return False
 
@@ -726,9 +796,12 @@ class FlightBlenderDatabaseWriter:
                 operational_intent_details=peer_operational_intent_details,
                 operational_intent_reference=peer_operational_intent_reference,
             )
-            composite_operational_intent_obj.save()
+            self.db.add(composite_operational_intent_obj)
+            self.db.commit()
+            self.db.refresh(composite_operational_intent_obj)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_or_update_composite_operational_intent(
@@ -737,8 +810,16 @@ class FlightBlenderDatabaseWriter:
         composite_operational_intent_payload: (CompositeOperationalIntentPayload | OperationalIntentStorage),
     ) -> bool:
         try:
-            operational_intent_details = FlightOperationalIntentDetail.objects.get(declaration=flight_declaration)
-            operational_intent_reference = FlightOperationalIntentReference.objects.get(declaration=flight_declaration)
+            operational_intent_details = (
+                self.db.query(FlightOperationalIntentDetail)
+                .filter(FlightOperationalIntentDetail.declaration_id == flight_declaration.id)
+                .first()
+            )
+            operational_intent_reference = (
+                self.db.query(FlightOperationalIntentReference)
+                .filter(FlightOperationalIntentReference.declaration_id == flight_declaration.id)
+                .first()
+            )
 
             if operational_intent_reference is None or operational_intent_details is None:
                 return False
@@ -753,10 +834,13 @@ class FlightBlenderDatabaseWriter:
                 operational_intent_details=operational_intent_details,
                 operational_intent_reference=operational_intent_reference,
             )
-            composite_operational_intent_obj.save()
+            self.db.add(composite_operational_intent_obj)
+            self.db.commit()
+            self.db.refresh(composite_operational_intent_obj)
 
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_reference_with_dss_response(
@@ -773,20 +857,27 @@ class FlightBlenderDatabaseWriter:
                 ovn=ovn,
                 dss_response=json.dumps(asdict(dss_response)),
             )
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
 
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_flight_operational_intent_reference_from_flight_declaration_obj(self, flight_declaration: FlightDeclaration) -> bool:
         try:
             flight_operational_intent_reference = FlightOperationalIntentReference(declaration=flight_declaration)
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
-        except FlightDeclaration.DoesNotExist:
-            return False
         except IntegrityError:
+            self.db.rollback()
+            return False
+        except Exception:
+            self.db.rollback()
             return False
 
     def create_flight_operational_intent_reference(
@@ -808,25 +899,32 @@ class FlightBlenderDatabaseWriter:
                 time_end=created_operational_intent_reference.time_end.value,
                 subscription_id=created_operational_intent_reference.subscription_id,
             )
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return flight_operational_intent_reference
-        except FlightDeclaration.DoesNotExist:
-            return False
         except IntegrityError as ie:
+            self.db.rollback()
             logger.error("IntegrityError while creating operational intent reference: %s" % ie)
             return False
         except Exception as e:
+            self.db.rollback()
             logger.error("Error while creating operational intent reference: %s" % e)
             return False
 
     def update_telemetry_timestamp(self, flight_declaration_id: str) -> bool:
         now = arrow.now().isoformat()
+        flight_declaration = self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
+        if flight_declaration is None:
+            return False
         try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
             flight_declaration.latest_telemetry_datetime = now
-            flight_declaration.save()
+            self.db.add(flight_declaration)
+            self.db.commit()
+            self.db.refresh(flight_declaration)
             return True
-        except FlightDeclaration.DoesNotExist:
+        except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_reference_op_int(
@@ -836,9 +934,12 @@ class FlightBlenderDatabaseWriter:
     ) -> bool:
         try:
             flight_operational_intent_reference.id = dss_operational_intent_reference_id
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_reference_ovn(
@@ -848,9 +949,12 @@ class FlightBlenderDatabaseWriter:
     ) -> bool:
         try:
             flight_operational_intent_reference.ovn = ovn
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_reference(
@@ -869,9 +973,12 @@ class FlightBlenderDatabaseWriter:
             flight_operational_intent_reference.subscription_id = update_operational_intent_reference.subscription_id
             flight_operational_intent_reference.manager = update_operational_intent_reference.manager
 
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_details(
@@ -891,9 +998,12 @@ class FlightBlenderDatabaseWriter:
             flight_operational_intent_detail.volumes = json.dumps(_volumes)
             flight_operational_intent_detail.off_nominal_volumes = json.dumps(_off_nominal_volumes)
             flight_operational_intent_detail.priority = operational_intent_details.priority
-            flight_operational_intent_detail.save()
+            self.db.add(flight_operational_intent_detail)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_detail)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operational_intent_reference_op_int_ovn(
@@ -905,9 +1015,12 @@ class FlightBlenderDatabaseWriter:
         try:
             flight_operational_intent_reference.id = dss_operational_intent_reference_id
             flight_operational_intent_reference.ovn = ovn
-            flight_operational_intent_reference.save()
+            self.db.add(flight_operational_intent_reference)
+            self.db.commit()
+            self.db.refresh(flight_operational_intent_reference)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operation_operational_intent(
@@ -916,21 +1029,31 @@ class FlightBlenderDatabaseWriter:
         operational_intent: PartialCreateOperationalIntentReference,
     ) -> bool:
         try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
+            flight_declaration = self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
+            if flight_declaration is None:
+                return False
             flight_declaration.operational_intent = json.dumps(asdict(operational_intent))
             # TODO: Convert the updated operational intent to GeoJSON
-            flight_declaration.save()
+            self.db.add(flight_declaration)
+            self.db.commit()
+            self.db.refresh(flight_declaration)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def update_flight_operation_state(self, flight_declaration_id: str, state: int) -> bool:
         try:
-            flight_declaration = FlightDeclaration.objects.get(id=flight_declaration_id)
+            flight_declaration = self.db.query(FlightDeclaration).filter(FlightDeclaration.id == flight_declaration_id).first()
+            if flight_declaration is None:
+                return False
             flight_declaration.state = state
-            flight_declaration.save()
+            self.db.add(flight_declaration)
+            self.db.commit()
+            self.db.refresh(flight_declaration)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def create_surveillance_session(self, session_id: str, valid_until: str) -> bool:
@@ -939,14 +1062,15 @@ class FlightBlenderDatabaseWriter:
                 id=session_id,
                 valid_until=valid_until,
             )
-            surveillance_session.save()
+            self.db.add(surveillance_session)
+            self.db.commit()
+            self.db.refresh(surveillance_session)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_surveillance_monitoring_heartbeat_periodic_task(self, session_id: str) -> bool:
-        surveillance_monitoring_job = TaskScheduler()
-        every = 1
         now = arrow.now()
         session_id = session_id if session_id else str(uuid.uuid4())
 
@@ -954,24 +1078,22 @@ class FlightBlenderDatabaseWriter:
         task_name = "send_heartbeat_to_consumer"
         logger.info("Creating periodic task for surveillance monitoring, it expires at %s" % expires)
         try:
-            p_task = surveillance_monitoring_job.schedule_every(
-                task_name=task_name,
-                period="seconds",
-                every=every,
-                expires=expires.isoformat(),
+            task_scheduler = TaskScheduler(
+                periodic_task_name=task_name,
                 session_id=session_id,
-                flight_declaration=None,
             )
-            p_task.start()
+            self.db.add(task_scheduler)
+            self.db.commit()
+            self.db.refresh(task_scheduler)
+            logger.warning("Periodic task '%s' registered in DB. Use a separate Celery beat scheduler to dispatch it." % task_name)
             return True
         except Exception as e:
+            self.db.rollback()
             logger.debug(f"{e}")
             logger.error("Could not create surveillance monitoring heartbeat periodic task")
             return False
 
     def create_surveillance_monitoring_track_periodic_task(self, session_id: str) -> bool:
-        surveillance_monitoring_job = TaskScheduler()
-        every = 1
         now = arrow.now()
         session_id = session_id if session_id else str(uuid.uuid4())
 
@@ -979,29 +1101,30 @@ class FlightBlenderDatabaseWriter:
         task_name = "send_and_generate_track_to_consumer"
         logger.info("Creating periodic task for surveillance monitoring tracks, it expires at %s" % expires)
         try:
-            p_task = surveillance_monitoring_job.schedule_every(
-                task_name=task_name,
-                period="seconds",
-                every=every,
-                expires=expires.isoformat(),
+            task_scheduler = TaskScheduler(
+                periodic_task_name=task_name,
                 session_id=session_id,
-                flight_declaration=None,
             )
-            p_task.start()
+            self.db.add(task_scheduler)
+            self.db.commit()
+            self.db.refresh(task_scheduler)
+            logger.warning("Periodic task '%s' registered in DB. Use a separate Celery beat scheduler to dispatch it." % task_name)
             return True
         except Exception as e:
+            self.db.rollback()
             logger.debug(f"Error creating surveillance monitoring heartbeat periodic task: {e}")
             logger.error("Could not create surveillance monitoring heartbeat periodic task")
             return False
 
     def remove_track_monitoring_heartbeat_periodic_task(self, track_monitoring_heartbeat_task: TaskScheduler):
-        track_monitoring_heartbeat_task.terminate()
+        self.db.delete(track_monitoring_heartbeat_task)
+        self.db.commit()
 
     def remove_surveillance_monitoring_heartbeat_periodic_task(self, surveillance_monitoring_heartbeat_task: TaskScheduler):
-        surveillance_monitoring_heartbeat_task.terminate()
+        self.db.delete(surveillance_monitoring_heartbeat_task)
+        self.db.commit()
 
     def create_conformance_monitoring_periodic_task(self, flight_declaration: FlightDeclaration) -> bool:
-        conformance_monitoring_job = TaskScheduler()
         every = int(os.getenv("HEARTBEAT_RATE_SECS", default=5))
         now = arrow.now()
         session_id = str(uuid.uuid4())
@@ -1012,27 +1135,27 @@ class FlightBlenderDatabaseWriter:
         task_name = "check_flight_conformance"
         logger.info("Creating periodic task for conformance monitoring expires at %s" % expires)
         try:
-            p_task = conformance_monitoring_job.schedule_every(
-                task_name=task_name,
-                period="seconds",
-                every=every,
-                expires=expires.isoformat(),
-                flight_declaration=flight_declaration,
+            task_scheduler = TaskScheduler(
+                periodic_task_name=task_name,
                 session_id=session_id,
+                flight_declaration=flight_declaration,
             )
-
-            p_task.start()
+            self.db.add(task_scheduler)
+            self.db.commit()
+            self.db.refresh(task_scheduler)
+            logger.warning("Periodic task '%s' registered in DB. Use a separate Celery beat scheduler to dispatch it." % task_name)
             return True
         except Exception as e:
+            self.db.rollback()
             logger.debug(f"Error creating conformance monitoring periodic task: {e}")
             logger.error("Could not create periodic task")
             return False
 
     def remove_conformance_monitoring_periodic_task(self, conformance_monitoring_task: TaskScheduler):
-        conformance_monitoring_task.terminate()
+        self.db.delete(conformance_monitoring_task)
+        self.db.commit()
 
     def create_rid_stream_monitoring_periodic_task(self, session_id: str, end_datetime: str) -> bool:
-        rid_stream_monitoring_job = TaskScheduler()
         every = int(os.getenv("HEARTBEAT_RATE_SECS", default=5))
         now = arrow.now()
         stream_end = arrow.get(end_datetime)
@@ -1042,24 +1165,24 @@ class FlightBlenderDatabaseWriter:
         task_name = "check_rid_stream_conformance"
 
         try:
-            p_task = rid_stream_monitoring_job.schedule_every(
-                task_name=task_name,
-                period="seconds",
-                every=every,
-                expires=expires.isoformat(),
+            task_scheduler = TaskScheduler(
+                periodic_task_name=task_name,
                 session_id=session_id,
-                flight_declaration=None,
             )
-
+            self.db.add(task_scheduler)
+            self.db.commit()
+            self.db.refresh(task_scheduler)
+            logger.warning("Periodic task '%s' registered in DB. Use a separate Celery beat scheduler to dispatch it." % task_name)
             logger.error("Created and starting RID stream observation task")
-            p_task.start()
             return True
         except Exception as e:
+            self.db.rollback()
             logger.error("Could not create RID stream observation periodic task %s" % e)
             return False
 
     def remove_rid_stream_monitoring_periodic_task(self, rid_stream_monitoring_task: TaskScheduler):
-        rid_stream_monitoring_task.terminate()
+        self.db.delete(rid_stream_monitoring_task)
+        self.db.commit()
 
     def create_rid_subscription_record(
         self,
@@ -1081,29 +1204,38 @@ class FlightBlenderDatabaseWriter:
                 flight_details=flights_dict,
                 is_simulated=is_simulated,
             )
-            rid_subscription.save()
+            self.db.add(rid_subscription)
+            self.db.commit()
+            self.db.refresh(rid_subscription)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def update_flight_details_in_rid_subscription_record(self, existing_subscription_record: ISASubscription, flights_dict: str) -> bool:
         try:
             existing_subscription_record.flight_details = flights_dict
-            existing_subscription_record.save()
+            self.db.add(existing_subscription_record)
+            self.db.commit()
+            self.db.refresh(existing_subscription_record)
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def delete_all_simulated_rid_subscription_records(self) -> bool:
         try:
-            ISASubscription.objects.filter(is_simulated=True).delete()
+            self.db.query(ISASubscription).filter(ISASubscription.is_simulated == True).delete()  # noqa: E712
+            self.db.commit()
             return True
         except Exception:
+            self.db.rollback()
             return False
 
     def clear_stored_operational_intents(self):
-        PeerOperationalIntentReference.objects.filter(is_live=False).delete()
-        PeerOperationalIntentDetail.objects.filter(is_live=False).delete()
+        self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.is_live == False).delete()  # noqa: E712
+        self.db.query(PeerOperationalIntentDetail).filter(PeerOperationalIntentDetail.is_live == False).delete()  # noqa: E712
+        self.db.commit()
 
     def write_constraint_details(self, constraint_id: str, constraint: ConstraintData) -> bool:
         try:
@@ -1111,9 +1243,12 @@ class FlightBlenderDatabaseWriter:
                 id=constraint_id,
                 details=json.dumps(asdict(constraint.details)),
             )
-            constraint_obj.save()
+            self.db.add(constraint_obj)
+            self.db.commit()
+            self.db.refresh(constraint_obj)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def write_constraint_reference_details(self, constraint: ConstraintData) -> bool:
@@ -1123,9 +1258,12 @@ class FlightBlenderDatabaseWriter:
                 ovn=constraint.reference.ovn,
                 details=json.dumps(asdict(constraint.reference)),
             )
-            constraint_reference_obj.save()
+            self.db.add(constraint_reference_obj)
+            self.db.commit()
+            self.db.refresh(constraint_reference_obj)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_or_update_composite_constraint(self, composite_constraint_payload: CompositeConstraintPayload) -> CompositeConstraint | bool:
@@ -1140,9 +1278,12 @@ class FlightBlenderDatabaseWriter:
                 alt_max=composite_constraint_payload.alt_max,
                 alt_min=composite_constraint_payload.alt_min,
             )
-            composite_constraint_obj.save()
+            self.db.add(composite_constraint_obj)
+            self.db.commit()
+            self.db.refresh(composite_constraint_obj)
             return True
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def update_constraint_reference_ovn(
@@ -1152,10 +1293,13 @@ class FlightBlenderDatabaseWriter:
     ) -> bool:
         try:
             constraint_reference.ovn = ovn
-            constraint_reference.save()
+            self.db.add(constraint_reference)
+            self.db.commit()
+            self.db.refresh(constraint_reference)
             return True
 
         except IntegrityError:
+            self.db.rollback()
             return False
 
     def create_or_update_geofence(self, geofence_payload: GeofencePayload) -> None | GeoFence:
@@ -1174,9 +1318,12 @@ class FlightBlenderDatabaseWriter:
                 end_datetime=geofence_payload.end_datetime.value,
                 geozone=json.dumps(geofence_payload.geozone, cls=EnhancedJSONEncoder),
             )
-            geofence.save()
+            self.db.add(geofence)
+            self.db.commit()
+            self.db.refresh(geofence)
             return geofence
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_or_update_constraint_detail(self, constraint: ConstraintDetails, geofence: GeoFence) -> ConstraintDetail | None:
@@ -1189,9 +1336,12 @@ class FlightBlenderDatabaseWriter:
                 _type=constraint.type,
                 geofence=geofence,
             )
-            constraint_obj.save()
+            self.db.add(constraint_obj)
+            self.db.commit()
+            self.db.refresh(constraint_obj)
             return constraint_obj
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_or_update_constraint_reference(
@@ -1212,9 +1362,12 @@ class FlightBlenderDatabaseWriter:
                 geofence=geofence,
                 flight_declaration=flight_declaration,
             )
-            constraint_obj.save()
+            self.db.add(constraint_obj)
+            self.db.commit()
+            self.db.refresh(constraint_obj)
             return constraint_obj
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def _serialize_operator_location(self, operator_location):
@@ -1244,45 +1397,54 @@ class FlightBlenderDatabaseWriter:
                 uas_id=uas_id,
                 eu_classification=eu_classification,
             )
-            rid_flight_details.save()
+            self.db.add(rid_flight_details)
+            self.db.commit()
+            self.db.refresh(rid_flight_details)
             return rid_flight_details
         except IntegrityError:
+            self.db.rollback()
             return None
 
     def create_or_update_rid_flight_details(self, rid_flight_details_payload: RIDFlightDetails):
-        rid_flight_details_exist = RIDFlightDetail.objects.filter(id=rid_flight_details_payload.id).exists()
+        rid_flight_details = self.db.query(RIDFlightDetail).filter(RIDFlightDetail.id == rid_flight_details_payload.id).first()
         operator_location = self._serialize_operator_location(rid_flight_details_payload.operator_location)
         auth_data = self._serialize_auth_data(rid_flight_details_payload.auth_data)
         eu_classification = self._serialize_eu_classification(rid_flight_details_payload.eu_classification)
         uas_id = self._serialize_uas_id(rid_flight_details_payload.uas_id)
-        if rid_flight_details_exist:
-            rid_flight_details = RIDFlightDetail.objects.get(id=rid_flight_details_payload.id)
+        if rid_flight_details is not None:
             rid_flight_details.operation_description = rid_flight_details_payload.operation_description
             rid_flight_details.operator_location = operator_location
             rid_flight_details.auth_data = auth_data
             rid_flight_details.uas_id = uas_id
             rid_flight_details.eu_classification = eu_classification
             try:
-                rid_flight_details.save()
+                self.db.add(rid_flight_details)
+                self.db.commit()
+                self.db.refresh(rid_flight_details)
                 return rid_flight_details
             except IntegrityError:
+                self.db.rollback()
                 return None
         else:
             return self._create_rid_flight_details(rid_flight_details_payload)
 
     def delete_all_flight_observations(self) -> bool:
         try:
-            FlightObservation.objects.all().delete()
+            self.db.query(FlightObservation).delete()
+            self.db.commit()
             return True
         except Exception as e:
+            self.db.rollback()
             logger.error(f"Error deleting all flight observations: {e}")
             return False
 
     def delete_all_flight_details(self) -> bool:
         try:
-            RIDFlightDetail.objects.all().delete()
+            self.db.query(RIDFlightDetail).delete()
+            self.db.commit()
             return True
         except Exception as e:
+            self.db.rollback()
             logger.error(f"Error deleting all flight observations: {e}")
             return False
 
@@ -1291,35 +1453,45 @@ class FlightBlenderDatabaseWriter:
         Canonical method for all sensor health changes.
         1. Updates SurveillanceSensorHealth.status
         2. Creates SurveillanceSensortHealthTracking record (with recovery_type)
-        3. Fires surveillance_sensor_failure_signal for any status transition
+        3. Calls process_sensor_status_change handler for any status transition
 
         recovery_type should be "automatic" or "manual" when new_status == "operational"
         and the sensor is recovering from degraded/outage. Pass None for failure transitions.
         """
-        from surveillance_monitoring_operations.custom_signals import surveillance_sensor_failure_signal
+        from surveillance_monitoring_operations.custom_signals import process_sensor_status_change
 
-        try:
-            sensor = SurveillanceSensor.objects.get(id=sensor_id)
-        except SurveillanceSensor.DoesNotExist:
+        sensor = self.db.query(SurveillanceSensor).filter(SurveillanceSensor.id == sensor_id).first()
+        if sensor is None:
             logger.error(f"update_sensor_health_status: sensor {sensor_id} not found")
             return False
 
-        health, created = SurveillanceSensorHealth.objects.get_or_create(sensor=sensor, defaults={"status": new_status})
+        health = self.db.query(SurveillanceSensorHealth).filter(SurveillanceSensorHealth.sensor_id == sensor.id).first()
+        created = health is None
+        if created:
+            health = SurveillanceSensorHealth(sensor_id=sensor.id, status=new_status)
+            self.db.add(health)
+            self.db.commit()
+            self.db.refresh(health)
+
         previous_status = health.status if not created else new_status
 
         if not created:
             if previous_status == new_status:
                 return True
             health.status = new_status
-            health.save(update_fields=["status", "updated_at"])
+            self.db.add(health)
+            self.db.commit()
+            self.db.refresh(health)
 
-        SurveillanceSensortHealthTracking.objects.create(
-            sensor=sensor,
+        tracking = SurveillanceSensortHealthTracking(
+            sensor_id=sensor.id,
             status=new_status,
             recovery_type=recovery_type,
         )
+        self.db.add(tracking)
+        self.db.commit()
 
-        surveillance_sensor_failure_signal.send(
+        process_sensor_status_change(
             sender="update_sensor_health_status",
             sensor_id=sensor_id,
             previous_status=previous_status,
@@ -1330,32 +1502,38 @@ class FlightBlenderDatabaseWriter:
 
     def record_heartbeat_event(self, session_id: str, expected_at: datetime, delivered_on_time: bool) -> bool:
         try:
-            session = SurveillanceSession.objects.get(id=session_id)
-            SurveillanceHeartbeatEvent.objects.create(
+            session = self.db.query(SurveillanceSession).filter(SurveillanceSession.id == session_id).first()
+            if session is None:
+                logger.error(f"record_heartbeat_event: session {session_id} not found")
+                return False
+            heartbeat_event = SurveillanceHeartbeatEvent(
                 session=session,
                 expected_at=expected_at,
                 delivered_on_time=delivered_on_time,
             )
+            self.db.add(heartbeat_event)
+            self.db.commit()
             return True
-        except SurveillanceSession.DoesNotExist:
-            logger.error(f"record_heartbeat_event: session {session_id} not found")
-            return False
         except Exception as e:
+            self.db.rollback()
             logger.error(f"record_heartbeat_event: {e}")
             return False
 
     def record_track_event(self, session_id: str, expected_at: datetime, had_active_tracks: bool) -> bool:
         try:
-            session = SurveillanceSession.objects.get(id=session_id)
-            SurveillanceTrackEvent.objects.create(
+            session = self.db.query(SurveillanceSession).filter(SurveillanceSession.id == session_id).first()
+            if session is None:
+                logger.error(f"record_track_event: session {session_id} not found")
+                return False
+            track_event = SurveillanceTrackEvent(
                 session=session,
                 expected_at=expected_at,
                 had_active_tracks=had_active_tracks,
             )
+            self.db.add(track_event)
+            self.db.commit()
             return True
-        except SurveillanceSession.DoesNotExist:
-            logger.error(f"record_track_event: session {session_id} not found")
-            return False
         except Exception as e:
+            self.db.rollback()
             logger.error(f"record_track_event: {e}")
             return False
