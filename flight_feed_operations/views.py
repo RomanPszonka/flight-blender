@@ -1,4 +1,3 @@
-# Create your views here.
 import json
 import uuid
 from dataclasses import asdict
@@ -6,19 +5,18 @@ from os import environ as env
 
 import arrow
 import dacite
-from django.http import JsonResponse
-from django.utils.decorators import method_decorator
-from django.views.generic import TemplateView
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse
 from dotenv import find_dotenv, load_dotenv
 from jwcrypto import jwk
 from loguru import logger
 from marshmallow import ValidationError
-from rest_framework import generics
-from rest_framework.decorators import api_view
+from sqlalchemy.orm import Session
 
 from auth_helper.utils import requires_scopes
 from common.data_definitions import FLIGHTBLENDER_READ_SCOPE, FLIGHTBLENDER_WRITE_SCOPE
 from common.database_operations import FlightBlenderDatabaseReader
+from flight_blender.db import get_db
 from rid_operations import view_port_ops
 from rid_operations.data_definitions import (
     SignedUnSignedTelemetryObservations,
@@ -36,30 +34,28 @@ from .data_definitions import (
 from .models import SignedTelmetryPublicKey
 from .pki_helper import MessageVerifier, ResponseSigningOperations
 from .rid_telemetry_helper import FlightBlenderTelemetryValidator, NestedDict
-from .serializers import SignedTelmetryPublicKeySerializer
 from .tasks import start_opensky_network_stream, write_incoming_air_traffic_data
 
 ENV_FILE = find_dotenv()
 if ENV_FILE:
     load_dotenv(ENV_FILE)
 
-
-class HomeView(TemplateView):
-    template_name = "homebase/home.html"
+router = APIRouter()
 
 
-class ASGIHomeView(TemplateView):
-    def get_context_data(self, **kwargs):
-        context = super().get_context_data(**kwargs)
-        session_id = self.request.GET.get("session_id", "00000000-0000-0000-0000-000000000000")
-        context["session_id"] = session_id
-        return context
-
-    template_name = "homebase/realtime.html"
+@router.get("/")
+async def home(request: Request):
+    return JSONResponse(content={"message": "Welcome to Flight Blender"}, status_code=200)
 
 
-@api_view(["GET"])
-def public_key_view(request):
+@router.get("/realtime")
+async def realtime_home(request: Request):
+    session_id = request.query_params.get("session_id", "00000000-0000-0000-0000-000000000000")
+    return JSONResponse(content={"message": "Realtime view", "session_id": session_id}, status_code=200)
+
+
+@router.get("/signing_public_key")
+async def public_key_view(request: Request):
     # Source: https://github.com/jazzband/django-oauth-toolkit/blob/016c6c3bf62c282991c2ce3164e8233b81e3dd4d/oauth2_provider/views/oidc.py#L105
     keys = []
     private_key = env.get("SECRET_KEY", None)
@@ -72,32 +68,31 @@ def public_key_view(request):
                 data.update(json.loads(key.export_public()))
                 keys.append(data)
 
-            response = JsonResponse({"keys": keys})
-            response["Access-Control-Allow-Origin"] = "*"
+            response = JSONResponse(content={"keys": keys})
+            response.headers["Access-Control-Allow-Origin"] = "*"
+            return response
         except Exception:
-            response = JsonResponse({})
+            return JSONResponse(content={})
     else:
-        response = JsonResponse({})
-
-    return response
+        return JSONResponse(content={})
 
 
-@api_view(["GET"])
-def ping(request):
-    return JsonResponse({"message": "pong"}, status=200)
+@router.get("/ping")
+async def ping(request: Request):
+    return JSONResponse(content={"message": "pong"}, status_code=200)
 
 
-@api_view(["POST"])
+@router.post("/set_air_traffic/{session_id}")
 @requires_scopes([FLIGHTBLENDER_WRITE_SCOPE])
-def set_air_traffic(request, session_id):
+async def set_air_traffic(request: Request, session_id: str, db: Session = Depends(get_db)):
     """
     This is the main POST method that takes in a request for Air traffic observation and processes the input data.
 
     Args:
-        request (HttpRequest): The HTTP request object containing air traffic observation data.
+        request (Request): The HTTP request object containing air traffic observation data.
 
     Returns:
-        JsonResponse: A JSON response indicating the result of the processing.
+        JSONResponse: A JSON response indicating the result of the processing.
 
     Raises:
         AssertionError: If the Content-Type of the request is not 'application/json'.
@@ -133,12 +128,12 @@ def set_air_traffic(request, session_id):
     """
 
     try:
-        assert request.headers["Content-Type"] == "application/json"
+        assert request.headers.get("content-type") == "application/json"
     except AssertionError:
         msg = {"message": "Unsupported Media Type"}
-        return JsonResponse(msg, status=415)
+        return JSONResponse(content=msg, status_code=415)
     else:
-        req = request.data
+        req = json.loads(await request.body())
 
     try:
         observations = req["observations"]
@@ -149,7 +144,7 @@ def set_air_traffic(request, session_id):
         )
 
         m = asdict(msg)
-        return JsonResponse(m, status=m["status"])
+        return JSONResponse(content=m, status_code=m["status"])
     schema = ObservationSchema()
     validated_observations = []
 
@@ -163,7 +158,7 @@ def set_air_traffic(request, session_id):
                 "message": "One of your observations do not have mandatory required fields or has incorrect data types. Please see error details.",
                 "errors": err.messages,
             }
-            return JsonResponse(msg, status=400)
+            return JSONResponse(content=msg, status_code=400)
 
     # Process validated observations
     session_id_str = str(session_id) if session_id else "00000000-0000-0000-0000-000000000000"
@@ -183,23 +178,23 @@ def set_air_traffic(request, session_id):
         write_incoming_air_traffic_data.delay(json.dumps(asdict(so)))
 
     op = FlightObservationsProcessingResponse(message="OK", status=201)
-    return JsonResponse(asdict(op), status=op.status)
+    return JSONResponse(content=asdict(op), status_code=op.status)
 
 
-@api_view(["GET"])
+@router.get("/get_air_traffic/{session_id}")
 @requires_scopes([FLIGHTBLENDER_READ_SCOPE])
-def get_air_traffic(request, session_id):
+async def get_air_traffic(request: Request, session_id: str, db: Session = Depends(get_db)):
     """
     This endpoint retrieves air traffic data within a specified view bounding box.
 
     Args:
-        request (HttpRequest): The HTTP request object containing query parameters.
+        request (Request): The HTTP request object containing query parameters.
 
     Returns:
-        JsonResponse: A JSON response containing air traffic observations within the specified view bounding box.
+        JSONResponse: A JSON response containing air traffic observations within the specified view bounding box.
 
     Raises:
-        JsonResponse: If the view bounding box is not provided or is invalid, returns a 400 status with an error message.
+        JSONResponse: If the view bounding box is not provided or is invalid, returns a 400 status with an error message.
     """
 
     try:
@@ -207,16 +202,15 @@ def get_air_traffic(request, session_id):
         view_port = list(map(float, view.split(",")))
     except (KeyError, ValueError):
         incorrect_parameters = {"message": "A view bbox is necessary with four values: minx, miny, maxx and maxy"}
-        return JsonResponse(incorrect_parameters, status=400, content_type="application/json")
+        return JSONResponse(content=incorrect_parameters, status_code=400)
 
     view_port_valid = view_port_ops.check_view_port(view_port_coords=view_port)
 
     if not view_port_valid:
         view_port_error = {"message": "A incorrect view port bbox was provided"}
-        return JsonResponse(
-            json.loads(json.dumps(view_port_error)),
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content=json.loads(json.dumps(view_port_error)),
+            status_code=400,
         )
     try:
         view_port_box = view_port_ops.build_view_port_box(view_port_coords=view_port)
@@ -253,23 +247,22 @@ def get_air_traffic(request, session_id):
         )
         all_traffic_observations.append(asdict(so))
 
-    return JsonResponse(
-        {"observations": all_traffic_observations},
-        status=200,
-        content_type="application/json",
+    return JSONResponse(
+        content={"observations": all_traffic_observations},
+        status_code=200,
     )
 
 
-@api_view(["GET"])
+@router.get("/start_opensky_feed")
 @requires_scopes([FLIGHTBLENDER_READ_SCOPE])
-def start_opensky_feed(request):
+async def start_opensky_feed(request: Request):
     """
     Starts the OpenSky Network data stream for a specified viewport.
     This method takes in a viewport as a lat1, lon1, lat2, lon2 coordinate system and starts the stream of data from the OpenSky Network for 60 seconds.
     Args:
-        request (HttpRequest): The HTTP request object containing query parameters.
+        request (Request): The HTTP request object containing query parameters.
     Returns:
-        JsonResponse: A JSON response indicating the result of the operation.
+        JSONResponse: A JSON response indicating the result of the operation.
             - If successful, returns a message indicating the stream has started with status 200.
             - If the viewport parameters are incorrect or invalid, returns an error message with status 400.
     Raises:
@@ -282,31 +275,30 @@ def start_opensky_feed(request):
         view_port = [float(i) for i in view.split(",")]
     except (KeyError, ValueError):
         incorrect_parameters = {"message": "A view bbox is necessary with four values: minx, miny, maxx and maxy"}
-        return JsonResponse(incorrect_parameters, status=400, content_type="application/json")
+        return JSONResponse(content=incorrect_parameters, status_code=400)
 
     if not view_port_ops.check_view_port(view_port_coords=view_port):
         view_port_error = {"message": "An incorrect view port bbox was provided"}
-        return JsonResponse(view_port_error, status=400, content_type="application/json")
+        return JSONResponse(content=view_port_error, status_code=400)
 
     sesion_id = uuid.uuid4()
     start_opensky_network_stream.delay(view_port=json.dumps(view_port), session_id=str(sesion_id))
-    return JsonResponse(
-        {"message": "Openskies Network stream started"},
-        status=200,
-        content_type="application/json",
+    return JSONResponse(
+        content={"message": "Openskies Network stream started"},
+        status_code=200,
     )
 
 
-@api_view(["PUT"])
-def set_signed_telemetry(request):
+@router.put("/set_signed_telemetry")
+async def set_signed_telemetry(request: Request, db: Session = Depends(get_db)):
     """
     This endpoint sets signed telemetry details into Flight Blender. It securely receives signed telemetry information
     and validates it against allowed public keys in Flight Blender. Since the messages are signed, authentication
     requirements for tokens are turned off.
     Args:
-        request (HttpRequest): The HTTP request object containing the signed telemetry data.
+        request (Request): The HTTP request object containing the signed telemetry data.
     Returns:
-        JsonResponse: A JSON response indicating the result of the operation. Possible responses include:
+        JSONResponse: A JSON response indicating the result of the operation. Possible responses include:
             - 400 Bad Request: If message verification fails, required observation keys are missing, flight details
               or current states are invalid, or the operation ID does not match any current operation in Flight Blender.
             - 201 Created: If telemetry data is successfully submitted.
@@ -320,25 +312,23 @@ def set_signed_telemetry(request):
         7. Returns appropriate JSON responses based on the validation and processing results.
     """
     my_message_verifier = MessageVerifier()
-    my_flight_blender_database_reader = FlightBlenderDatabaseReader()
+    my_flight_blender_database_reader = FlightBlenderDatabaseReader(db)
     my_response_signer = ResponseSigningOperations()
     verified = my_message_verifier.verify_message(request)
 
     if not verified:
-        return JsonResponse(
-            asdict(MessageVerificationFailedResponse(message="Could not verify against public keys setup in Flight Blender")),
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content=asdict(MessageVerificationFailedResponse(message="Could not verify against public keys setup in Flight Blender")),
+            status_code=400,
         )
 
-    raw_data = request.data
+    raw_data = json.loads(await request.body())
     my_telemetry_validator = FlightBlenderTelemetryValidator()
 
     if not my_telemetry_validator.validate_observation_key_exists(raw_request_data=raw_data):
-        return JsonResponse(
-            {"message": "A flight observation object with current state and flight details is necessary"},
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content={"message": "A flight observation object with current state and flight details is necessary"},
+            status_code=400,
         )
 
     rid_observations = raw_data["observations"]
@@ -346,10 +336,9 @@ def set_signed_telemetry(request):
 
     for flight in rid_observations:
         if not my_telemetry_validator.validate_flight_details_current_states_exist(flight=flight):
-            return JsonResponse(
-                {"message": "A flights object with current states, flight details is necessary"},
-                status=400,
-                content_type="application/json",
+            return JSONResponse(
+                content={"message": "A flights object with current states, flight details is necessary"},
+                status_code=400,
             )
 
         current_states = flight["current_states"]
@@ -359,10 +348,9 @@ def set_signed_telemetry(request):
             all_states = my_telemetry_validator.parse_validate_current_states(current_states=current_states)
             f_details = my_telemetry_validator.parse_validate_rid_details(rid_flight_details=flight_details["rid_details"])
         except KeyError as ke:
-            return JsonResponse(
-                {"message": f"A states object with a fully valid current states is necessary, the parsing the following key encountered errors {ke}"},
-                status=400,
-                content_type="application/json",
+            return JSONResponse(
+                content={"message": f"A states object with a fully valid current states is necessary, the parsing the following key encountered errors {ke}"},
+                status_code=400,
             )
 
         single_observation_set = SignedUnSignedTelemetryObservations(current_states=all_states, flight_details=f_details)
@@ -382,20 +370,18 @@ def set_signed_telemetry(request):
             ]:  # Activated, Contingent, Non-conforming
                 stream_rid_telemetry_data.delay(rid_telemetry_observations=json.dumps(unsigned_telemetry_observations))
             else:
-                return JsonResponse(
-                    {
+                return JSONResponse(
+                    content={
                         "message": f"The operation ID: {operation_id} is not one of Activated, Contingent or Non-conforming states in Flight Blender, telemetry submission will be ignored, please change the state first."
                     },
-                    status=400,
-                    content_type="application/json",
+                    status_code=400,
                 )
         else:
-            return JsonResponse(
-                {
+            return JSONResponse(
+                content={
                     "message": f"The operation ID: {operation_id} in the flight details object provided does not match any current operation in Flight Blender"
                 },
-                status=400,
-                content_type="application/json",
+                status_code=400,
             )
 
     submission_success = {"message": "Telemetry data successfully submitted"}
@@ -403,27 +389,27 @@ def set_signed_telemetry(request):
     signed_data = my_response_signer.sign_json_via_django(submission_success)
     submission_success["signed"] = signed_data
 
-    response = JsonResponse(submission_success, status=201, content_type="application/json")
-    response["Content-Digest"] = content_digest
-    response["req"] = request.headers["Signature"]
+    response = JSONResponse(content=submission_success, status_code=201)
+    response.headers["Content-Digest"] = content_digest
+    response.headers["req"] = request.headers.get("Signature", "")
 
     return response
 
 
-@api_view(["GET"])
+@router.get("/traffic_information_discovery")
 @requires_scopes([FLIGHTBLENDER_READ_SCOPE])
-def traffic_information_discovery_view(request):
+async def traffic_information_discovery_view(request: Request):
     """
     Handles the traffic information discovery request.
     This view processes the request to retrieve traffic information within a specified view port.
     It validates the view port parameters and checks the format of the requested data.
     Parameters:
-    request (HttpRequest): The HTTP request object containing query parameters.
+    request (Request): The HTTP request object containing query parameters.
     Query Parameters:
     - view (str): A comma-separated string representing the bounding box coordinates (minx, miny, maxx, maxy).
     - format (str, optional): The format of the requested data. Only 'mavlink' is supported.
     Returns:
-    JsonResponse: A JSON response containing the traffic information discovery details or an error message.
+    JSONResponse: A JSON response containing the traffic information discovery details or an error message.
     Response Codes:
     - 200: Traffic information discovery information successfully retrieved.
     - 400: Bad request due to incorrect parameters or unsupported format.
@@ -432,25 +418,22 @@ def traffic_information_discovery_view(request):
         view = request.query_params["view"]
         view_port = [float(i) for i in view.split(",")]
     except (KeyError, ValueError):
-        return JsonResponse(
-            {"message": "A view bbox is necessary with four values: minx, miny, maxx and maxy"},
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content={"message": "A view bbox is necessary with four values: minx, miny, maxx and maxy"},
+            status_code=400,
         )
 
     if not view_port_ops.check_view_port(view_port_coords=view_port):
-        return JsonResponse(
-            {"message": "An incorrect view port bbox was provided"},
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content={"message": "An incorrect view port bbox was provided"},
+            status_code=400,
         )
 
     data_format = request.query_params.get("format", None)
     if data_format and data_format != "mavlink":
-        return JsonResponse(
-            {"message": "A format query parameter can only be 'mavlink' since 'asterix' is not supported."},
-            status=400,
-            content_type="application/json",
+        return JSONResponse(
+            content={"message": "A format query parameter can only be 'mavlink' since 'asterix' is not supported."},
+            status_code=400,
         )
 
     traffic_information_url = env.get("TRAFFIC_INFORMATION_URL", "https://not_implemented_yet")
@@ -460,20 +443,20 @@ def traffic_information_discovery_view(request):
         description="Start a QUIC query to the traffic information url service to get traffic information in the specified view port",
     )
 
-    return JsonResponse(asdict(response_data), status=200, content_type="application/json")
+    return JSONResponse(content=asdict(response_data), status_code=200)
 
 
-@api_view(["PUT"])
+@router.put("/set_telemetry")
 @requires_scopes([FLIGHTBLENDER_WRITE_SCOPE])
-def set_telemetry(request):
+async def set_telemetry(request: Request, db: Session = Depends(get_db)):
     """
     A view to handle the submission of telemetry data from GCS and/or flights.
     This endpoint receives telemetry data in JSON format, validates it, and processes it accordingly.
     The data is expected to contain flight observations with current states and flight details.
     Args:
-        request (HttpRequest): The HTTP request object containing telemetry data in JSON format.
+        request (Request): The HTTP request object containing telemetry data in JSON format.
     Returns:
-        JsonResponse: A JSON response indicating the result of the telemetry data submission.
+        JSONResponse: A JSON response indicating the result of the telemetry data submission.
                       - 201 status code if the submission is successful.
                       - 400 status code if there are validation errors or incorrect parameters.
     Raises:
@@ -484,15 +467,15 @@ def set_telemetry(request):
         - Checks if the operation ID exists and is in the correct state before processing telemetry data.
     """
 
-    raw_data = request.data
+    raw_data = json.loads(await request.body())
 
-    my_flight_blender_database_reader = FlightBlenderDatabaseReader()
+    my_flight_blender_database_reader = FlightBlenderDatabaseReader(db)
     my_telemetry_validator = FlightBlenderTelemetryValidator()
 
     observations_exist = my_telemetry_validator.validate_observation_key_exists(raw_request_data=raw_data)
     if not observations_exist:
         incorrect_parameters = {"message": "A flight observation object with current state and flight details is necessary"}
-        return JsonResponse(incorrect_parameters, status=400, content_type="application/json")
+        return JSONResponse(content=incorrect_parameters, status_code=400)
     # Get a list of flight data
 
     rid_observations = raw_data["observations"]
@@ -500,10 +483,9 @@ def set_telemetry(request):
     unsigned_telemetry_observations: list[SignedUnSignedTelemetryObservations] = []
     for flight in rid_observations:
         if not my_telemetry_validator.validate_flight_details_current_states_exist(flight=flight):
-            return JsonResponse(
-                {"message": "A flights object with current states, flight details is necessary"},
-                status=400,
-                content_type="application/json",
+            return JSONResponse(
+                content={"message": "A flights object with current states, flight details is necessary"},
+                status_code=400,
             )
 
         current_states = flight["current_states"]
@@ -512,16 +494,14 @@ def set_telemetry(request):
             all_states = my_telemetry_validator.parse_validate_current_states(current_states=current_states)
             f_details = my_telemetry_validator.parse_validate_rid_details(rid_flight_details=flight_details)
         except KeyError as ke:
-            return JsonResponse(
-                {"message": f"A states object with a fully valid current states is necessary, the parsing the following key encountered errors {ke}"},
-                status=400,
-                content_type="application/json",
+            return JSONResponse(
+                content={"message": f"A states object with a fully valid current states is necessary, the parsing the following key encountered errors {ke}"},
+                status_code=400,
             )
         except dacite.exceptions.WrongTypeError as wte:
-            return JsonResponse(
-                {"message": f"The parsing of telemetry object raised the following errors {wte}"},
-                status=400,
-                content_type="application/json",
+            return JSONResponse(
+                content={"message": f"The parsing of telemetry object raised the following errors {wte}"},
+                status_code=400,
             )
 
         single_observation_set = SignedUnSignedTelemetryObservations(current_states=all_states, flight_details=f_details)
@@ -532,12 +512,11 @@ def set_telemetry(request):
         flight_declaration_active = my_flight_blender_database_reader.check_flight_declaration_active(flight_declaration_id=operation_id, now=now)
 
         if not flight_declaration_active:
-            return JsonResponse(
-                {
+            return JSONResponse(
+                content={
                     "message": f"The operation ID: {operation_id} in the flight details object provided does not match any current operation in Flight Blender"
                 },
-                status=400,
-                content_type="application/json",
+                status_code=400,
             )
 
         flight_operation = my_flight_blender_database_reader.get_flight_declaration_by_id(flight_declaration_id=operation_id)
@@ -551,24 +530,78 @@ def set_telemetry(request):
             serialized_observations = [asdict(obs, dict_factory=NestedDict) for obs in unsigned_telemetry_observations]
             stream_rid_telemetry_data.delay(rid_telemetry_observations=json.dumps(serialized_observations))
         else:
-            return JsonResponse(
-                {
+            return JSONResponse(
+                content={
                     "message": f"The operation ID: {operation_id} is not one of Activated, Contingent or Non-conforming states in Flight Blender, telemetry submission will be ignored, please change the state first."
                 },
-                status=400,
-                content_type="application/json",
+                status_code=400,
             )
     submission_success = {"message": "Telemetry data successfully submitted"}
-    return JsonResponse(submission_success, status=201, content_type="application/json")
+    return JSONResponse(content=submission_success, status_code=201)
 
 
-@method_decorator(requires_scopes(["geo-awareness.test"]), name="dispatch")
-class SignedTelmetryPublicKeyList(generics.ListCreateAPIView):
-    queryset = SignedTelmetryPublicKey.objects.all()
-    serializer_class = SignedTelmetryPublicKeySerializer
+@router.get("/public_keys/")
+@requires_scopes(["geo-awareness.test"])
+async def list_signed_telemetry_public_keys(request: Request, db: Session = Depends(get_db)):
+    keys = db.query(SignedTelmetryPublicKey).all()
+    result = [
+        {"key_id": str(k.key_id), "url": k.url, "is_active": k.is_active}
+        for k in keys
+    ]
+    return JSONResponse(content=result, status_code=200)
 
 
-@method_decorator(requires_scopes(["geo-awareness.test"]), name="dispatch")
-class SignedTelmetryPublicKeyDetail(generics.RetrieveUpdateDestroyAPIView):
-    queryset = SignedTelmetryPublicKey.objects.all()
-    serializer_class = SignedTelmetryPublicKeySerializer
+@router.post("/public_keys/")
+@requires_scopes(["geo-awareness.test"])
+async def create_signed_telemetry_public_key(request: Request, db: Session = Depends(get_db)):
+    data = json.loads(await request.body())
+    key = SignedTelmetryPublicKey(
+        key_id=data["key_id"],
+        url=data["url"],
+        is_active=data.get("is_active", True),
+    )
+    db.add(key)
+    db.commit()
+    db.refresh(key)
+    result = {"key_id": str(key.key_id), "url": key.url, "is_active": key.is_active}
+    return JSONResponse(content=result, status_code=201)
+
+
+@router.get("/public_keys/{pk}")
+@requires_scopes(["geo-awareness.test"])
+async def get_signed_telemetry_public_key(request: Request, pk: str, db: Session = Depends(get_db)):
+    key = db.query(SignedTelmetryPublicKey).filter(SignedTelmetryPublicKey.id == pk).first()
+    if not key:
+        return JSONResponse(content={"message": "Not found"}, status_code=404)
+    result = {"key_id": str(key.key_id), "url": key.url, "is_active": key.is_active}
+    return JSONResponse(content=result, status_code=200)
+
+
+@router.put("/public_keys/{pk}")
+@requires_scopes(["geo-awareness.test"])
+async def update_signed_telemetry_public_key(request: Request, pk: str, db: Session = Depends(get_db)):
+    key = db.query(SignedTelmetryPublicKey).filter(SignedTelmetryPublicKey.id == pk).first()
+    if not key:
+        return JSONResponse(content={"message": "Not found"}, status_code=404)
+    data = json.loads(await request.body())
+    if "key_id" in data:
+        key.key_id = data["key_id"]
+    if "url" in data:
+        key.url = data["url"]
+    if "is_active" in data:
+        key.is_active = data["is_active"]
+    db.commit()
+    db.refresh(key)
+    result = {"key_id": str(key.key_id), "url": key.url, "is_active": key.is_active}
+    return JSONResponse(content=result, status_code=200)
+
+
+@router.delete("/public_keys/{pk}")
+@requires_scopes(["geo-awareness.test"])
+async def delete_signed_telemetry_public_key(request: Request, pk: str, db: Session = Depends(get_db)):
+    key = db.query(SignedTelmetryPublicKey).filter(SignedTelmetryPublicKey.id == pk).first()
+    if not key:
+        return JSONResponse(content={"message": "Not found"}, status_code=404)
+    db.delete(key)
+    db.commit()
+    return JSONResponse(content={"message": "Deleted"}, status_code=204)

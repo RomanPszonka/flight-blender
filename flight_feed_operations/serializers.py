@@ -1,13 +1,11 @@
-from rest_framework import serializers
+from typing import Optional
 
-from .models import SignedTelmetryPublicKey
+from pydantic import BaseModel
 
 
-class SignedTelmetryPublicKeySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = SignedTelmetryPublicKey
-        fields = (
-            "key_id",
-            "url",
-            "is_active",
-        )
+class SignedTelmetryPublicKeySerializer(BaseModel):
+    key_id: str
+    url: str
+    is_active: Optional[bool] = True
+
+    model_config = {"from_attributes": True}
