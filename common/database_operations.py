@@ -418,7 +418,7 @@ class FlightBlenderDatabaseReader:
         return observations
 
     def get_active_surveillance_sensors(self) -> list[SurveillanceSensor]:
-        return self.db.query(SurveillanceSensor).filter(SurveillanceSensor.is_active == True).all()  # noqa: E712
+        return self.db.query(SurveillanceSensor).filter(SurveillanceSensor.is_active.is_(True)).all()
 
     def get_surveillance_sensor_by_id(self, sensor_id: UUID) -> SurveillanceSensor | None:
         return self.db.query(SurveillanceSensor).filter(SurveillanceSensor.id == sensor_id).first()
@@ -508,7 +508,7 @@ class FlightBlenderDatabaseReader:
             .filter(
                 OperatorRIDNotification.created_at >= start_time,
                 OperatorRIDNotification.created_at <= end_time,
-                OperatorRIDNotification.is_active == True,  # noqa: E712
+                OperatorRIDNotification.is_active.is_(True),
             )
             .all()
         )
@@ -528,7 +528,7 @@ class FlightBlenderDatabaseReader:
         return (
             self.db.query(ISASubscription)
             .filter(
-                ISASubscription.is_simulated == True,  # noqa: E712
+                ISASubscription.is_simulated.is_(True),
                 ISASubscription.end_datetime >= now,
                 ISASubscription.created_at <= now,
             )
@@ -604,7 +604,7 @@ class FlightBlenderDatabaseWriter:
                 altitude_mm=single_observation.altitude_mm,
                 source_type=single_observation.source_type,
                 icao_address=single_observation.icao_address,
-                metadata=json.dumps(single_observation.metadata),
+                metadata_=json.dumps(single_observation.metadata),
             )
             self.db.add(flight_observation)
             self.db.commit()
@@ -673,7 +673,7 @@ class FlightBlenderDatabaseWriter:
         try:
             flight_operational_intent_reference = FlightOperationalIntentReference(
                 id=operational_intent_reference_payload.id,  # assigned by the DSS
-                declaration=flight_declaration,
+                declaration_id=flight_declaration.id,
                 ovn=operational_intent_reference_payload.ovn,
                 state=operational_intent_reference_payload.state,
                 uss_availability=operational_intent_reference_payload.uss_availability,
@@ -714,7 +714,7 @@ class FlightBlenderDatabaseWriter:
                         all_subscriptions.append(asdict(subscrition))
 
                     subscriber = Subscriber(
-                        operational_intent_reference=flight_operational_intent_reference,
+                        operational_intent_reference_id=flight_operational_intent_reference.id,
                         uss_base_url=subscriber.uss_base_url,
                         subscriptions=json.dumps(all_subscriptions),
                     )
@@ -734,7 +734,7 @@ class FlightBlenderDatabaseWriter:
         try:
             _operational_intent_details_payload = asdict(operational_intent_details_payload)
             flight_operational_intent_detail_obj = FlightOperationalIntentDetail(
-                declaration=flight_declaration,
+                declaration_id=flight_declaration.id,
                 volumes=json.dumps(_operational_intent_details_payload["volumes"]),
                 off_nominal_volumes=json.dumps(_operational_intent_details_payload["off_nominal_volumes"]),
                 priority=operational_intent_details_payload.priority,
@@ -761,12 +761,12 @@ class FlightBlenderDatabaseWriter:
     ) -> None | ConformanceRecord:
         try:
             conformance_record = ConformanceRecord(
-                flight_declaration=flight_declaration,
+                flight_declaration_id=flight_declaration.id,
                 conformance_state=conformance_non_conformance_state,
                 description=description,
                 event_type=event_type,
                 geofence_breach=geofence_breach,
-                geofence=geofence,
+                geofence_id=geofence.id if geofence else None,
                 resolved=resolved,
             )
             self.db.add(conformance_record)
@@ -793,8 +793,8 @@ class FlightBlenderDatabaseWriter:
                 end_datetime=composite_operational_intent.end_datetime,
                 alt_min=composite_operational_intent.alt_min,
                 alt_max=composite_operational_intent.alt_max,
-                operational_intent_details=peer_operational_intent_details,
-                operational_intent_reference=peer_operational_intent_reference,
+                operational_intent_details_id=peer_operational_intent_details.id,
+                operational_intent_reference_id=peer_operational_intent_reference.id,
             )
             self.db.add(composite_operational_intent_obj)
             self.db.commit()
@@ -825,14 +825,14 @@ class FlightBlenderDatabaseWriter:
                 return False
 
             composite_operational_intent_obj = CompositeOperationalIntent(
-                declaration=flight_declaration,
+                declaration_id=flight_declaration.id,
                 bounds=composite_operational_intent_payload.bounds,
                 start_datetime=composite_operational_intent_payload.start_datetime,
                 end_datetime=composite_operational_intent_payload.end_datetime,
                 alt_min=composite_operational_intent_payload.alt_min,
                 alt_max=composite_operational_intent_payload.alt_max,
-                operational_intent_details=operational_intent_details,
-                operational_intent_reference=operational_intent_reference,
+                operational_intent_details_id=operational_intent_details.id,
+                operational_intent_reference_id=operational_intent_reference.id,
             )
             self.db.add(composite_operational_intent_obj)
             self.db.commit()
@@ -852,7 +852,7 @@ class FlightBlenderDatabaseWriter:
     ) -> bool:
         try:
             flight_operational_intent_reference = FlightOperationalIntentReference(
-                declaration=flight_declaration,
+                declaration_id=flight_declaration.id,
                 id=dss_operational_intent_reference_id,
                 ovn=ovn,
                 dss_response=json.dumps(asdict(dss_response)),
@@ -868,7 +868,7 @@ class FlightBlenderDatabaseWriter:
 
     def create_flight_operational_intent_reference_from_flight_declaration_obj(self, flight_declaration: FlightDeclaration) -> bool:
         try:
-            flight_operational_intent_reference = FlightOperationalIntentReference(declaration=flight_declaration)
+            flight_operational_intent_reference = FlightOperationalIntentReference(declaration_id=flight_declaration.id)
             self.db.add(flight_operational_intent_reference)
             self.db.commit()
             self.db.refresh(flight_operational_intent_reference)
@@ -888,7 +888,7 @@ class FlightBlenderDatabaseWriter:
         try:
             flight_operational_intent_reference = FlightOperationalIntentReference(
                 id=created_operational_intent_reference.id,
-                declaration=flight_declaration,
+                declaration_id=flight_declaration.id,
                 uss_availability=created_operational_intent_reference.uss_availability,
                 ovn=created_operational_intent_reference.ovn,
                 manager=created_operational_intent_reference.manager,
@@ -1138,7 +1138,7 @@ class FlightBlenderDatabaseWriter:
             task_scheduler = TaskScheduler(
                 periodic_task_name=task_name,
                 session_id=session_id,
-                flight_declaration=flight_declaration,
+                flight_declaration_id=flight_declaration.id,
             )
             self.db.add(task_scheduler)
             self.db.commit()
@@ -1225,7 +1225,7 @@ class FlightBlenderDatabaseWriter:
 
     def delete_all_simulated_rid_subscription_records(self) -> bool:
         try:
-            self.db.query(ISASubscription).filter(ISASubscription.is_simulated == True).delete()  # noqa: E712
+            self.db.query(ISASubscription).filter(ISASubscription.is_simulated.is_(True)).delete()
             self.db.commit()
             return True
         except Exception:
@@ -1233,8 +1233,8 @@ class FlightBlenderDatabaseWriter:
             return False
 
     def clear_stored_operational_intents(self):
-        self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.is_live == False).delete()  # noqa: E712
-        self.db.query(PeerOperationalIntentDetail).filter(PeerOperationalIntentDetail.is_live == False).delete()  # noqa: E712
+        self.db.query(PeerOperationalIntentReference).filter(PeerOperationalIntentReference.is_live.is_(False)).delete()
+        self.db.query(PeerOperationalIntentDetail).filter(PeerOperationalIntentDetail.is_live.is_(False)).delete()
         self.db.commit()
 
     def write_constraint_details(self, constraint_id: str, constraint: ConstraintData) -> bool:
@@ -1334,7 +1334,7 @@ class FlightBlenderDatabaseWriter:
             constraint_obj = ConstraintDetail(
                 volumes=json.dumps(_constraint_volumes),
                 _type=constraint.type,
-                geofence=geofence,
+                geofence_id=geofence.id,
             )
             self.db.add(constraint_obj)
             self.db.commit()
@@ -1359,8 +1359,8 @@ class FlightBlenderDatabaseWriter:
                 version=constraint_reference.version,
                 time_start=constraint_reference.time_start.value,
                 time_end=constraint_reference.time_end.value,
-                geofence=geofence,
-                flight_declaration=flight_declaration,
+                geofence_id=geofence.id,
+                flight_declaration_id=flight_declaration.id,
             )
             self.db.add(constraint_obj)
             self.db.commit()
@@ -1507,7 +1507,7 @@ class FlightBlenderDatabaseWriter:
                 logger.error(f"record_heartbeat_event: session {session_id} not found")
                 return False
             heartbeat_event = SurveillanceHeartbeatEvent(
-                session=session,
+                session_id=session.id,
                 expected_at=expected_at,
                 delivered_on_time=delivered_on_time,
             )
@@ -1526,7 +1526,7 @@ class FlightBlenderDatabaseWriter:
                 logger.error(f"record_track_event: session {session_id} not found")
                 return False
             track_event = SurveillanceTrackEvent(
-                session=session,
+                session_id=session.id,
                 expected_at=expected_at,
                 had_active_tracks=had_active_tracks,
             )
