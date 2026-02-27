@@ -10,11 +10,12 @@ from uuid import UUID
 import arrow
 import shapely.geometry
 from dacite import from_dict
-from django.http import HttpResponse, JsonResponse
 from dotenv import find_dotenv, load_dotenv
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import JSONResponse, Response
 from implicitdict import ImplicitDict
 from loguru import logger
-from rest_framework.decorators import api_view
+from sqlalchemy.orm import Session
 from uas_standards.astm.f3411.v22a.constants import NetDetailsMaxDisplayAreaDiagonalKm
 from uas_standards.interuss.automated_testing.rid.v1.injection import (
     Time,
@@ -33,6 +34,7 @@ from common.database_operations import (
     FlightBlenderDatabaseWriter,
 )
 from common.utils import EnhancedJSONEncoder
+from flight_blender.db import get_db
 from flight_feed_operations import flight_stream_helper
 from uss_operations.uss_data_definitions import (
     FlightDetailsNotFoundMessage,
@@ -66,6 +68,8 @@ from .tasks import (
 
 load_dotenv(find_dotenv())
 
+router = APIRouter()
+
 
 class RIDOutputHelper:
     def make_json_compatible(self, struct: Any) -> Any:
@@ -87,14 +91,15 @@ class SubscriptionsHelper:
 
     """
 
-    def __init__(self):
+    def __init__(self, db: Session):
+        self.db = db
         self.my_rid_output_helper = RIDOutputHelper()
 
     def get_view_hash(self, view) -> int:
         return int(hashlib.sha256(view.encode("utf-8")).hexdigest(), 16) % 10**8
 
     def check_subscription_exists(self, view) -> bool:
-        my_database_reader = FlightBlenderDatabaseReader()
+        my_database_reader = FlightBlenderDatabaseReader(self.db)
         view_hash = self.get_view_hash(view)
         subscription_found = my_database_reader.check_rid_subscription_record_by_view_hash_exists(view_hash=view_hash)
 
@@ -126,16 +131,16 @@ class SubscriptionsHelper:
         pass
 
 
-@api_view(["GET"])
+@router.get("/capabilities")
 @requires_scopes([FLIGHTBLENDER_READ_SCOPE])
-def get_rid_capabilities(request):
+async def get_rid_capabilities(request: Request):
     status = RIDCapabilitiesResponse(capabilities=["ASTMRID2022"])
-    return JsonResponse(json.loads(json.dumps(status, cls=EnhancedJSONEncoder)), status=200)
+    return JSONResponse(content=json.loads(json.dumps(status, cls=EnhancedJSONEncoder)), status_code=200)
 
 
-@api_view(["PUT"])
+@router.put("/create_dss_subscription")
 @requires_scopes([FLIGHTBLENDER_WRITE_SCOPE])
-def create_dss_subscription(request, *args, **kwargs):
+async def create_dss_subscription(request: Request, db: Session = Depends(get_db)):
     """This module takes a lat, lng box from Flight Spotlight and puts in a subscription to the DSS for the ISA"""
 
     my_rid_output_helper = RIDOutputHelper()
@@ -144,13 +149,13 @@ def create_dss_subscription(request, *args, **kwargs):
         view_port = [float(i) for i in view.split(",")]
     except Exception:
         incorrect_parameters = {"message": "A view bounding box is necessary with four values: lat1,lng1,lat2,lng2."}
-        return HttpResponse(json.dumps(incorrect_parameters), status=400)
+        return Response(content=json.dumps(incorrect_parameters), status_code=400)
 
     view_port_valid = view_port_ops.check_view_port(view_port_coords=view_port)
 
     if not view_port_valid:
         incorrect_parameters = {"message": "A view bounding box is necessary with four values: lat1,lng1,lat2,lng2."}
-        return HttpResponse(json.dumps(incorrect_parameters), status=400)
+        return Response(content=json.dumps(incorrect_parameters), status_code=400)
 
     b = shapely.geometry.box(view_port[1], view_port[0], view_port[3], view_port[2])
     co_ordinates = list(zip(*b.exterior.coords.xy))
@@ -167,7 +172,7 @@ def create_dss_subscription(request, *args, **kwargs):
 
     request_id = str(uuid.uuid4())
 
-    my_subscription_helper = SubscriptionsHelper()
+    my_subscription_helper = SubscriptionsHelper(db)
     subscription_r = my_subscription_helper.create_new_rid_subscription(
         request_id=request_id,
         vertex_list=vertex_list,
@@ -197,24 +202,24 @@ def create_dss_subscription(request, *args, **kwargs):
         }
         status = 400
     msg = my_rid_output_helper.make_json_compatible(m)
-    return HttpResponse(json.dumps(msg), status=status, content_type=RESPONSE_CONTENT_TYPE)
+    return Response(content=json.dumps(msg), status_code=status, media_type=RESPONSE_CONTENT_TYPE)
 
 
-@api_view(["GET"])
+@router.get("/get_rid_data/{subscription_id}")
 @requires_scopes([FLIGHTBLENDER_READ_SCOPE])
-def get_rid_data(request, subscription_id):
+async def get_rid_data(request: Request, subscription_id: uuid.UUID, db: Session = Depends(get_db)):
     """This is the GET endpoint for remote id data given a DSS subscription id. Flight Blender will store flight URLs and every time the data is queried, it is mainly used by Flight Spotlight"""
 
     try:
-        UUID(subscription_id, version=4)
+        UUID(str(subscription_id), version=4)
     except ValueError:
-        return HttpResponse(
-            "Incorrect UUID passed in the parameters, please send a valid subscription ID",
-            status=400,
-            mimetype=RESPONSE_CONTENT_TYPE,
+        return Response(
+            content="Incorrect UUID passed in the parameters, please send a valid subscription ID",
+            status_code=400,
+            media_type=RESPONSE_CONTENT_TYPE,
         )
 
-    my_database_reader = FlightBlenderDatabaseReader()
+    my_database_reader = FlightBlenderDatabaseReader(db)
     flights_dict = {}
     # Get the flights URL from the DSS and put it in
     # reasonably we won't have more than 500 subscriptions active
@@ -235,39 +240,41 @@ def get_rid_data(request, subscription_id):
         if not all_flights_telemetry_data:
             logger.error(f"No telemetry data found for session_id {subscription_id}")
             return
-        return HttpResponse(
-            json.dumps(all_flights_telemetry_data),
-            status=200,
-            content_type=RESPONSE_CONTENT_TYPE,
+        return Response(
+            content=json.dumps(all_flights_telemetry_data),
+            status_code=200,
+            media_type=RESPONSE_CONTENT_TYPE,
         )
     else:
-        return HttpResponse(json.dumps({}), status=404, content_type=RESPONSE_CONTENT_TYPE)
+        return Response(content=json.dumps({}), status_code=404, media_type=RESPONSE_CONTENT_TYPE)
 
 
-@api_view(["POST"])
+@router.post("/uss/identification_service_areas/{isa_id}")
 @requires_scopes(["dss.write.identification_service_areas"])
-def dss_isa_callback(request, isa_id):
+async def dss_isa_callback(request: Request, isa_id: uuid.UUID, db: Session = Depends(get_db)):
     """This is the call back end point that other USSes in the DSS network call once a subscription is updated"""
 
-    _service_area = request.data["service_area"] if "service_area" in request.data else None
+    request_data = json.loads(await request.body())
+
+    _service_area = request_data["service_area"] if "service_area" in request_data else None
 
     if _service_area:
-        updated_service_area = from_dict(data_class=IdentificationServiceArea, data=request.data["service_area"])
+        updated_service_area = from_dict(data_class=IdentificationServiceArea, data=request_data["service_area"])
     else:
         updated_service_area = None
 
-    _subscriptions = request.data["subscriptions"]
+    _subscriptions = request_data["subscriptions"]
 
     for _subscription in _subscriptions:
         subscription = from_dict(data_class=SubscriptionState, data=_subscription)
 
-        if "extents" in request.data:
-            extents = from_dict(data_class=RIDVolume4D, data=request.data["extents"])
+        if "extents" in request_data:
+            extents = from_dict(data_class=RIDVolume4D, data=request_data["extents"])
         else:
             extents = None
 
         if updated_service_area:
-            my_database_reader = FlightBlenderDatabaseReader()
+            my_database_reader = FlightBlenderDatabaseReader(db)
             existing_subscription_record = my_database_reader.get_rid_subscription_record_by_subscription_id(
                 subscription_id=subscription.subscription_id
             )
@@ -290,7 +297,7 @@ def dss_isa_callback(request, isa_id):
                 extents=extents,
             )
             # Update flight details in the database
-            my_database_writer = FlightBlenderDatabaseWriter()
+            my_database_writer = FlightBlenderDatabaseWriter(db)
             my_database_writer.update_flight_details_in_rid_subscription_record(
                 existing_subscription_record=existing_subscription_record,
                 flights_dict=json.dumps(
@@ -301,15 +308,15 @@ def dss_isa_callback(request, isa_id):
                 ),
             )
 
-    return HttpResponse(status=204, content_type=RESPONSE_CONTENT_TYPE)
+    return Response(status_code=204, media_type=RESPONSE_CONTENT_TYPE)
 
 
-@api_view(["GET"])
+@router.get("/display_data/{flight_id}")
 @requires_scopes(["dss.read.identification_service_areas"])
-def get_flight_data(request, flight_id):
+async def get_flight_data(request: Request, flight_id: str, db: Session = Depends(get_db)):
     """This is the end point for the rid_qualifier to get details of a flight"""
 
-    my_database_reader = FlightBlenderDatabaseReader()
+    my_database_reader = FlightBlenderDatabaseReader(db)
     flight_details_record_exists = my_database_reader.check_flight_details_exist(flight_detail_id=flight_id)
 
     if flight_details_record_exists:
@@ -322,31 +329,31 @@ def get_flight_data(request, flight_id):
             flight_details_full,
             dict_factory=lambda x: {k: v for (k, v) in x if (v is not None)},
         )
-        return JsonResponse(json.loads(json.dumps(flight_details_response)), status=200)
+        return JSONResponse(content=json.loads(json.dumps(flight_details_response)), status_code=200)
     else:
         fd = FlightDetailsNotFoundMessage(message="The requested flight could not be found")
-        return JsonResponse(json.loads(json.dumps(asdict(fd))), status=404)
+        return JSONResponse(content=json.loads(json.dumps(asdict(fd))), status_code=404)
 
 
-@api_view(["GET"])
+@router.get("/display_data")
 @requires_scopes(["dss.read.identification_service_areas"])
-def get_display_data(request):
+async def get_display_data(request: Request, db: Session = Depends(get_db)):
     """This is the end point for the rid_qualifier test DSS network call once a subscription is updated"""
 
     # get the view bounding box
     # get the existing subscription id , if no subscription exists, then reject
     request_id = str(uuid.uuid4())
     my_rid_output_helper = RIDOutputHelper()
-    my_database_reader = FlightBlenderDatabaseReader()
+    my_database_reader = FlightBlenderDatabaseReader(db)
     try:
         view = request.query_params["view"]
         view_port = [float(i) for i in view.split(",")]
     except Exception:
         incorrect_parameters = {"message": "A view bbox is necessary with four values: minx, miny, maxx and maxy"}
-        return HttpResponse(
-            json.dumps(incorrect_parameters),
-            status=400,
-            content_type=RESPONSE_CONTENT_TYPE,
+        return Response(
+            content=json.dumps(incorrect_parameters),
+            status_code=400,
+            media_type=RESPONSE_CONTENT_TYPE,
         )
 
     view_port_valid = view_port_ops.check_view_port(view_port_coords=view_port)
@@ -355,7 +362,7 @@ def get_display_data(request):
 
     if (view_port_diagonal) > 7:
         view_port_too_large_msg = GenericErrorResponseMessage(message="The requested view %s rectangle is too large" % view)
-        return JsonResponse(json.loads(json.dumps(asdict(view_port_too_large_msg))), status=413)
+        return JSONResponse(content=json.loads(json.dumps(asdict(view_port_too_large_msg))), status_code=413)
     should_cluster = True if view_port_diagonal >= NetDetailsMaxDisplayAreaDiagonalKm else False
 
     b = shapely.geometry.box(view_port[1], view_port[0], view_port[3], view_port[2])
@@ -374,7 +381,7 @@ def get_display_data(request):
     if view_port_valid:
         # stream_id = hashlib.md5(view.encode('utf-8')).hexdigest()
         # create a subscription
-        my_subscription_helper = SubscriptionsHelper()
+        my_subscription_helper = SubscriptionsHelper(db)
         subscription_exists = my_subscription_helper.check_subscription_exists(view)
 
         if not subscription_exists:
@@ -456,39 +463,38 @@ def get_display_data(request):
 
         rid_flights_dict = my_rid_output_helper.make_json_compatible(rid_display_data)
         logger.info(rid_flights_dict)
-        return JsonResponse(
-            {
+        return JSONResponse(
+            content={
                 "flights": rid_flights_dict["flights"],
                 "clusters": rid_flights_dict["clusters"],
             },
-            status=200,
-            content_type=RESPONSE_CONTENT_TYPE,
+            status_code=200,
         )
     else:
         view_port_error = {"message": "A incorrect view port bbox was provided"}
-        return JsonResponse(view_port_error, status=400, content_type=RESPONSE_CONTENT_TYPE)
+        return JSONResponse(content=view_port_error, status_code=400)
 
 
-@api_view(["PUT"])
+@router.put("/tests/{test_id}")
 @requires_scopes(["rid.inject_test_data"])
-def create_test(request, test_id):
+async def create_test(request: Request, test_id: uuid.UUID):
     """This is the end point for the rid_qualifier to get details of a flight"""
 
-    rid_qualifier_payload = request.data
+    rid_qualifier_payload = json.loads(await request.body())
 
     try:
         requested_flights = rid_qualifier_payload["requested_flights"]
     except KeyError:
         msg = HTTPErrorResponse(message="Requested Flights not present in the payload", status=400)
         msg_dict = asdict(msg)
-        return JsonResponse(msg_dict["message"], status=msg_dict["status"])
+        return JSONResponse(content=msg_dict["message"], status_code=msg_dict["status"])
 
     r = get_redis()
 
     test_id = "rid-test_" + str(test_id)
     # Test already exists
     if r.exists(test_id):
-        return JsonResponse({}, status=409)
+        return JSONResponse(content={}, status_code=409)
     else:
         # Create a ISA in the DSS
         now = arrow.now()
@@ -499,12 +505,12 @@ def create_test(request, test_id):
 
     create_test_response = CreateTestResponse(injected_flights=requested_flights, version=1)
 
-    return JsonResponse(asdict(create_test_response), status=200)
+    return JSONResponse(content=asdict(create_test_response), status_code=200)
 
 
-@api_view(["DELETE"])
+@router.delete("/tests/{test_id}/{version}")
 @requires_scopes(["rid.inject_test_data"])
-def delete_test(request, test_id, version):
+async def delete_test(request: Request, test_id: uuid.UUID, version: str, db: Session = Depends(get_db)):
     """This is the end point for the rid_qualifier to get details of a flight"""
     # Deleting test
     test_id_str = str(test_id)
@@ -513,32 +519,32 @@ def delete_test(request, test_id, version):
     if r.exists(test_id_str):
         r.delete(test_id_str)
 
-    my_database_writer = FlightBlenderDatabaseWriter()
+    my_database_writer = FlightBlenderDatabaseWriter(db)
     my_database_writer.delete_all_simulated_rid_subscription_records()
     my_database_writer.delete_all_flight_observations()
     my_database_writer.delete_all_flight_details()
     # Stop streaming if it exists for this test
     r.set("stop_streaming_" + test_id_str, "1")
 
-    return JsonResponse({}, status=200)
+    return JSONResponse(content={}, status_code=200)
 
 
-@api_view(["GET"])
+@router.get("/user_notifications")
 @requires_scopes(["rid.inject_test_data"])
-def user_notifications(request):
+async def user_notifications(request: Request, db: Session = Depends(get_db)):
     try:
         after_datetime = request.query_params["after"]
         before_datetime = request.query_params["before"]
     except KeyError:
-        return HttpResponse(
-            json.dumps({"message": "Both 'after' and 'before' parameter is required."}),
-            status=400,
-            content_type=RESPONSE_CONTENT_TYPE,
+        return Response(
+            content=json.dumps({"message": "Both 'after' and 'before' parameter is required."}),
+            status_code=400,
+            media_type=RESPONSE_CONTENT_TYPE,
         )
     all_user_notifications = []
     after_datetime = arrow.get(after_datetime).datetime
     before_datetime = arrow.get(before_datetime).datetime
-    my_database_reader = FlightBlenderDatabaseReader()
+    my_database_reader = FlightBlenderDatabaseReader(db)
     all_user_notifications = my_database_reader.get_active_user_notifications_between_interval(start_time=after_datetime, end_time=before_datetime)
     logger.debug(f"Found {len(all_user_notifications)} user notifications..")
     all_notifications = []
@@ -552,4 +558,4 @@ def user_notifications(request):
 
     user_notifications = ImplicitDict.parse({"user_notifications": all_notifications}, ServiceProviderUserNotifications)
 
-    return JsonResponse(user_notifications, status=200)
+    return JSONResponse(content=user_notifications, status_code=200)
