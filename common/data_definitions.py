@@ -1,17 +1,15 @@
 from os import environ as env
 
-from django.utils.translation import gettext_lazy as _
-
 FLIGHTBLENDER_READ_SCOPE = env.get("FLIGHTBLENDER_READ_SCOPE", "flightblender.read")
 
 FLIGHTBLENDER_WRITE_SCOPE = env.get("FLIGHTBLENDER_WRITE_SCOPE", "flightblender.write")
 
 
 ALTITUDE_REF = (
-    (0, _("WGS84")),
-    (1, _("AGL")),
-    (2, _("MSL")),
-    (4, _("W84")),
+    (0, "WGS84"),
+    (1, "AGL"),
+    (2, "MSL"),
+    (4, "W84"),
 )
 ALTITUDE_REF_LOOKUP = {
     "WGS84": 0,
@@ -20,19 +18,19 @@ ALTITUDE_REF_LOOKUP = {
     "W84": 4,
 }
 CONFORMANCE_STATES = (
-    (0, _("Nonconforming")),
-    (1, _("Conforming")),
+    (0, "Nonconforming"),
+    (1, "Conforming"),
 )
 OPERATION_STATES = (
-    (0, _("Not Submitted")),
-    (1, _("Accepted")),
-    (2, _("Activated")),
-    (3, _("Nonconforming")),
-    (4, _("Contingent")),
-    (5, _("Ended")),
-    (6, _("Withdrawn")),
-    (7, _("Cancelled")),
-    (8, _("Rejected")),
+    (0, "Not Submitted"),
+    (1, "Accepted"),
+    (2, "Activated"),
+    (3, "Nonconforming"),
+    (4, "Contingent"),
+    (5, "Ended"),
+    (6, "Withdrawn"),
+    (7, "Cancelled"),
+    (8, "Rejected"),
 )
 ACTIVE_OPERATIONAL_STATES = [1, 2, 3, 4]
 
@@ -43,15 +41,15 @@ OPERATION_STATES_LOOKUP = {
 }
 
 OPERATION_TYPES = (
-    (1, _("VLOS")),
-    (2, _("BVLOS")),
-    (3, _("CREWED")),
+    (1, "VLOS"),
+    (2, "BVLOS"),
+    (3, "CREWED"),
 )
 
 USS_AVAILABILITY = (
-    (0, _("Unknown")),
-    (1, _("Normal")),
-    (2, _("Down")),
+    (0, "Unknown"),
+    (1, "Normal"),
+    (2, "Down"),
 )
 
 # When an operator changes a state, he / she puts a new state (via the API), this object specifies the event when a operator takes action
@@ -73,19 +71,19 @@ RESPONSE_CONTENT_TYPE = "application/json"
 
 
 FLIGHT_OBSERVATION_TRAFFIC_SOURCE = (
-    (0, _("1090ES")),
-    (1, _("UAT")),
-    (2, _("Multi-radar (MRT)")),
-    (3, _("MLAT")),
-    (4, _("SSR")),
-    (5, _("PSR")),
-    (6, _("Mode-S")),
-    (7, _("MRT")),
-    (8, _("SSR + PSR Fused")),
-    (9, _("ADS-B")),
-    (10, _("FLARM")),
-    (11, _("Network Remote-ID")),
-    (12, _("Other")),
+    (0, "1090ES"),
+    (1, "UAT"),
+    (2, "Multi-radar (MRT)"),
+    (3, "MLAT"),
+    (4, "SSR"),
+    (5, "PSR"),
+    (6, "Mode-S"),
+    (7, "MRT"),
+    (8, "SSR + PSR Fused"),
+    (9, "ADS-B"),
+    (10, "FLARM"),
+    (11, "Network Remote-ID"),
+    (12, "Other"),
 )
 
 

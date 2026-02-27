@@ -2,16 +2,10 @@ import datetime
 import json
 from dataclasses import asdict, is_dataclass
 
-from django.core.serializers.json import DjangoJSONEncoder
-from django.utils.encoding import force_str
-from django.utils.functional import Promise
 
-
-class LazyEncoder(DjangoJSONEncoder):
+class LazyEncoder(json.JSONEncoder):
     def default(self, obj):
-        if isinstance(obj, Promise):
-            return force_str(obj)
-        return super(LazyEncoder, self).default(obj)
+        return str(obj)
 
 
 class EnhancedJSONEncoder(json.JSONEncoder):
